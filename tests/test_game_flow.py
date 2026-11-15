@@ -4,13 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import itertools
-import tempfile
 import unittest
-from pathlib import Path
 from unittest.mock import patch
 
 from pokerbot.game import PokerGame
-from pokerbot.store import ChipStore
+from pokerbot.ui import CardsView
 
 
 class FakeUser:
@@ -19,10 +17,6 @@ class FakeUser:
     def __init__(self, name: str) -> None:
         self.id = next(self._ids)
         self.display_name = name
-        self.dms: list = []
-
-    async def send(self, **kwargs):
-        self.dms.append(kwargs)
 
 
 class FakeMessage:
@@ -50,8 +44,32 @@ class FakeChannel:
         return message
 
 
+class MemoryStore:
+    """Small in-memory stand-in for the Postgres wallet."""
+
+    def __init__(self) -> None:
+        self.balances: dict[int, int] = {}
+
+    async def balance(self, user_id: int) -> int:
+        return self.balances.get(user_id, 0)
+
+    async def debit(self, user_id: int, amount: int) -> int | None:
+        balance = self.balances.get(user_id, 0)
+        if balance < amount:
+            return None
+        self.balances[user_id] = balance - amount
+        return self.balances[user_id]
+
+    async def credit(self, user_id: int, amount: int) -> int:
+        self.balances[user_id] = self.balances.get(user_id, 0) + amount
+        return self.balances[user_id]
+
+    async def close(self) -> None:
+        pass
+
+
 class FakeBot:
-    def __init__(self, store: ChipStore) -> None:
+    def __init__(self, store: MemoryStore) -> None:
         self.store = store
         self.games: dict[int, PokerGame] = {}
 
@@ -59,8 +77,7 @@ class FakeBot:
 class GameFlowTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         asyncio.get_running_loop().set_debug(False)
-        self._tmp = tempfile.TemporaryDirectory()
-        self.store = ChipStore(Path(self._tmp.name) / "chips.sqlite3")
+        self.store = MemoryStore()
         self.bot = FakeBot(self.store)
         self.channel = FakeChannel()
         self.host = FakeUser("Host")
@@ -72,7 +89,6 @@ class GameFlowTests(unittest.IsolatedAsyncioTestCase):
         for game in list(self.bot.games.values()):
             await game.end("test cleanup")
         await self.store.close()
-        self._tmp.cleanup()
 
     async def _new_table(self) -> PokerGame:
         game, error = await PokerGame.create(
@@ -106,6 +122,13 @@ class GameFlowTests(unittest.IsolatedAsyncioTestCase):
 
             for _ in range(120):
                 actor = await self._next_actor(game)
+                if actor is not None:
+                    self.assertTrue(
+                        any(
+                            isinstance(m.kwargs.get("view"), CardsView)
+                            for m in self.channel.messages
+                        )
+                    )
                 if actor is None:
                     break
                 ok, message = await game.submit_action(users[actor], "call")

@@ -23,6 +23,14 @@ def main() -> None:
         )
         raise SystemExit(1)
 
+    if not os.getenv("DATABASE_URL"):
+        print(
+            "DATABASE_URL is missing. Add your PostgreSQL connection string "
+            "to .env.",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",

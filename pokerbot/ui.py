@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+from io import BytesIO
 from typing import TYPE_CHECKING
 
 import discord
@@ -58,6 +60,36 @@ class LobbyView(discord.ui.View):
         await interaction.response.defer(ephemeral=True)
         _ok, message = await self.game.start(interaction.user)
         await interaction.followup.send(message, ephemeral=True)
+
+
+class CardsView(discord.ui.View):
+    """Button on the public table that reveals cards only to the presser."""
+
+    def __init__(self, game: PokerGame) -> None:
+        super().__init__(timeout=None)
+        self.game = game
+
+    @discord.ui.button(
+        label="View my cards", style=discord.ButtonStyle.primary
+    )
+    async def view_cards(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        await interaction.response.defer(ephemeral=True)
+        data = await asyncio.to_thread(
+            self.game.cards_image, interaction.user.id
+        )
+        if data is None:
+            await interaction.followup.send(
+                "You are not in a live hand right now.", ephemeral=True
+            )
+            return
+        image, label = data
+        await interaction.followup.send(
+            content=f"**Your hand:** {label}",
+            file=discord.File(BytesIO(image), filename="your-hand.png"),
+            ephemeral=True,
+        )
 
 
 class RaiseModal(discord.ui.Modal, title="Raise the bet"):

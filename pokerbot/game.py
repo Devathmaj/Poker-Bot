@@ -23,7 +23,7 @@ from .config import (
     blinds_for_buy_in,
 )
 from .engine import Hand, HandResult, IllegalAction, Player, Table
-from .ui import ActionView, LobbyView
+from .ui import ActionView, CardsView, LobbyView
 from .visuals import PlayerVisual, TableVisual, render_hole_cards, render_table
 
 if TYPE_CHECKING:
@@ -113,11 +113,11 @@ class PokerGame:
         self.buy_in = buy_in
         self.small_blind, self.big_blind = blinds_for_buy_in(buy_in)
         self.table = Table([], self.small_blind, self.big_blind)
-        self.members: dict[int, discord.abc.User] = {}
 
         self.state = "lobby"
         self.lobby_message: discord.Message | None = None
         self.table_message: discord.Message | None = None
+        self.cards_message: discord.Message | None = None
         self.pending: PendingTurn | None = None
         self.task: asyncio.Task | None = None
         self._settled = False
@@ -145,7 +145,6 @@ class PokerGame:
             )
 
         game = cls(bot, channel, host, buy_in)
-        game.members[host.id] = host
         game.table.players.append(
             Player(host.id, host.display_name, buy_in)
         )
@@ -213,7 +212,6 @@ class PokerGame:
                 f"**{balance:,}**. Use `/daily` to claim more."
             )
 
-        self.members[user.id] = user
         self.table.players.append(
             Player(user.id, user.display_name, self.buy_in)
         )
@@ -241,8 +239,11 @@ class PokerGame:
                             f"**{len(self.table.players)} players** · "
                             f"**{self.buy_in:,}** chip stacks · "
                             f"blinds **{self.small_blind:,}/{self.big_blind:,}**\n\n"
-                            "Hole cards were sent by DM. Use `/cards` if you "
-                            "missed them. Your table is in this channel."
+                            "Your hole cards are always shown privately in "
+                            "this channel — press **View my cards** or use "
+                            "`/cards`.\n\n"
+                            "On your turn, type `check`, `call`, "
+                            "`raise <amount>`, `all in`, or `fold`."
                         ),
                         color=EMBED_COLOR,
                     ),
@@ -264,7 +265,7 @@ class PokerGame:
                     return
 
                 hand = self.table.start_hand()
-                await self._begin_hand(hand)
+                await self._begin_hand()
                 await self._play_hand(hand)
                 if self.state != "running":
                     return
@@ -287,7 +288,7 @@ class PokerGame:
                 f"The table stopped after an internal error ({type(exc).__name__})."
             )
 
-    async def _begin_hand(self, hand: Hand) -> None:
+    async def _begin_hand(self) -> None:
         self.pending = None
         self.table_message = None
 
@@ -297,37 +298,15 @@ class PokerGame:
         embed.set_image(url="attachment://table.png")
         self.table_message = await self.channel.send(embed=embed, file=file)
 
-        await asyncio.gather(
-            *(
-                self._send_hole_cards(player.user_id)
-                for player in hand.order
-            ),
-            return_exceptions=True,
+        if self.cards_message is not None:
+            with suppress(discord.HTTPException):
+                await self.cards_message.edit(view=None)
+        self.cards_message = await self.channel.send(
+            "🃏 **Hole cards are in.** Press **View my cards** or use "
+            "`/cards` — only you can see them.",
+            view=CardsView(self),
+            allowed_mentions=discord.AllowedMentions.none(),
         )
-
-    async def _send_hole_cards(self, user_id: int) -> None:
-        hand = self.table.hand
-        member = self.members.get(user_id)
-        if hand is None or member is None:
-            return
-        hole = hand.hole_cards.get(user_id, [])
-        if not hole:
-            return
-        image = await asyncio.to_thread(
-            render_hole_cards,
-            hole,
-            subtitle=describe_hole_cards(hole),
-            note=(
-                f"Hand #{self.table.hand_number} · blinds "
-                f"{self.small_blind:,}/{self.big_blind:,} · use /cards anytime"
-            ),
-        )
-        try:
-            await member.send(
-                file=discord.File(BytesIO(image), filename="your-hand.png")
-            )
-        except discord.HTTPException:
-            logger.info("Could not DM hole cards to %s", user_id)
 
     async def _play_hand(self, hand: Hand) -> None:
         while self.state == "running" and not hand.is_over:
@@ -599,7 +578,9 @@ class PokerGame:
             if actor_id is not None and deadline is not None:
                 embed.description = (
                     f"**{hand.street}** · pot **{hand.pot + self.table.bonus_pot:,}**\n"
-                    f"<@{actor_id}> is up · <t:{int(deadline)}:R>"
+                    f"<@{actor_id}> is up · <t:{int(deadline)}:R>\n"
+                    "Type `check`, `call`, `raise <amount>`, `all in`, "
+                    "or `fold`."
                 )
             else:
                 embed.description = (
@@ -714,6 +695,9 @@ class PokerGame:
             if self.table_message is not None:
                 with suppress(discord.HTTPException):
                     await self.table_message.edit(view=None)
+            if self.cards_message is not None:
+                with suppress(discord.HTTPException):
+                    await self.cards_message.edit(view=None)
             if self.lobby_message is not None:
                 with suppress(discord.HTTPException):
                     await self.lobby_message.edit(view=None)

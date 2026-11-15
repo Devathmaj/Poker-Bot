@@ -1,4 +1,5 @@
 discord.py>=2.4,<3
 Pillow>=10.1
 pokerkit>=0.7,<0.8
+psycopg[binary]>=3.1
 python-dotenv>=1.0

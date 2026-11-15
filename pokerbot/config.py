@@ -26,7 +26,7 @@ SHOWDOWN_PAUSE = 8
 STREET_PAUSE = 1.2
 
 # Storage
-DB_PATH = Path(os.getenv("POKER_DB_PATH", BASE_DIR / "data" / "chips.sqlite3"))
+DATABASE_URL = os.getenv("DATABASE_URL")
 
 # Discord
 GUILD_ID = os.getenv("GUILD_ID")

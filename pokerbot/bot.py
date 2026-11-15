@@ -10,7 +10,7 @@ import discord
 from discord.ext import commands
 
 from .cog import PokerCog
-from .config import DB_PATH, GUILD_ID
+from .config import DATABASE_URL, GUILD_ID
 from .store import ChipStore
 
 if TYPE_CHECKING:
@@ -28,7 +28,12 @@ class PokerBot(commands.Bot):
             intents=intents,
             help_command=None,
         )
-        self.store = ChipStore(DB_PATH)
+        if not DATABASE_URL:
+            raise RuntimeError(
+                "DATABASE_URL is missing. Add your PostgreSQL connection string "
+                "to .env."
+            )
+        self.store = ChipStore(DATABASE_URL)
         self.games: dict[int, PokerGame] = {}
 
     async def setup_hook(self) -> None:

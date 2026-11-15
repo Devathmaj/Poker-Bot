@@ -11,19 +11,20 @@ A Python Discord bot for no-limit Texas Hold'em with persistent chip wallets, da
 - **`join game`** — typed in the channel, or use the **Join game** button. Does nothing if no table exists.
 - **`start game`** — the host starts the game by typing this or pressing **Start game**.
 - **Full no-limit Hold'em** — blinds, four betting rounds, all-ins, side pots, split pots, min-raise rules, and showdowns are handled by [PokerKit](https://github.com/uoftcprg/pokerkit).
-- **Private cards** — hole cards are sent by DM when each hand starts. `/cards` shows them again, ephemerally, along with your current best hand.
+- **Chat actions** — during your turn, type exactly `check`, `call`, `raise <amount>`, `all in`, or `fold` in the channel. Partial messages such as `call now` are ignored. The action buttons still work.
+- **Private cards** — a **View my cards** button appears in the channel at the start of every hand. Pressing it (or using `/cards`) shows your hole cards and current best hand in an ephemeral reply that only you can see. No DMs required.
 - **Public table** — a rendered table image shows stacks, bets, the button, community cards, pot, folded/removed players, and hole cards only at showdown.
 - **Turn timer** — each player has **60 seconds**. Missing the deadline auto-folds.
 - **Timeout removal** — after more than **3** timeouts (the 4th), the player is removed from the table and their remaining stack is forfeited to the pot.
 - **`/endgame`** — the host or a server admin closes the table immediately. Remaining stacks are cashed back into wallets.
-- **Chip wallet** — SQLite balances survive bot restarts.
+- **Chip wallet** — balances are stored in PostgreSQL via `DATABASE_URL` and survive bot restarts.
 - **Crypto RNG** — the deck is shuffled with `secrets.SystemRandom`, and PokerKit draws from that single shuffled deck (so burn cards never duplicate dealt cards).
 
 ![Table](docs/preview-table.png)
 
 ## Setup
 
-Requires **Python 3.11+**.
+Requires **Python 3.11+** and a **PostgreSQL** database.
 
 1. Create and activate a virtual environment, then install dependencies:
 
@@ -40,16 +41,15 @@ Requires **Python 3.11+**.
    - Open **Bot** and reset/copy the token.
    - Enable **Message Content Intent** under **Privileged Gateway Intents**. This is required for the typed `join game` / `start game` commands.
    - Invite it with the `bot` and `applications.commands` scopes and these permissions: **View Channels**, **Send Messages**, **Embed Links**, **Attach Files**, **Read Message History**.
-   - Users need **DMs from server members** enabled to receive hole cards; `/cards` works as a private fallback.
 
-3. Configure environment variables:
+3. Create a PostgreSQL database and configure environment variables:
 
    ```bash
    cp .env.example .env
-   # edit .env and paste DISCORD_TOKEN=...
+   # edit .env and set DISCORD_TOKEN=... and DATABASE_URL=postgresql://...
    ```
 
-   For instant slash-command updates while developing, set `GUILD_ID` in `.env` to your server ID. Otherwise commands sync globally (Discord can take a while to show them).
+   `DATABASE_URL` is required. The bot creates its `users` table automatically on startup. For instant slash-command updates while developing, set `GUILD_ID` in `.env` to your server ID. Otherwise commands sync globally (Discord can take a while to show them).
 
 4. Run the bot from the project root:
 
@@ -75,8 +75,12 @@ Requires **Python 3.11+**.
 | `/creategame [buy_in]` | everyone | Opens a table. Buy-in range is 100–100,000; default 500. One table per channel. |
 | `join game` (typed) | everyone | Joins the lobby. Requires enough chips; the buy-in is deducted. |
 | `start game` (typed) | host | Starts the game. Also available as the **Start game** button. |
+| `check` / `call` / `fold` (typed) | player whose turn it is | Acts in the hand. The whole message must match, ignoring case and surrounding spaces. |
+| `all in`, `all-in`, or `allin` (typed) | player whose turn it is | Moves all-in. |
+| `raise <amount>` or `bet <amount>` (typed) | player whose turn it is | Raises to the given total (commas allowed). `raise to <amount>` also works. |
 | Buttons | players in hand | Fold, Check/Call, Raise (opens a modal), All-in. |
-| `/cards` | players in hand | Ephemeral view of your hole cards and current best five-card hand. |
+| **View my cards** | players in hand | Opens an ephemeral, user-only view of your hole cards and current best hand. |
+| `/cards` | players in hand | Same private view, available at any time during a hand. |
 | `/endgame` | host or admin | Immediately closes the table and cashes out remaining stacks. |
 
 ## Rules in brief
@@ -116,7 +120,7 @@ pokerbot/
   engine.py     poker rules wrapper, seating/blinds rotation, CSPRNG-shuffled deck
   ui.py         lobby/action buttons and raise modal
   visuals.py    Pillow table, hole-card, and hand-ranking renders
-  store.py      SQLite chip wallet
+  store.py      PostgreSQL chip wallet (DATABASE_URL)
 assets/cards/   MIT-licensed playing card PNGs + LICENSE
 tests/          engine, wallet, and headless game-loop tests
 ```
@@ -127,7 +131,7 @@ tests/          engine, wallet, and headless game-loop tests
 python -m unittest discover -s tests -v
 ```
 
-The suite covers deck determinism, heads-up blinds/action order, raise validation, all-in side-pot chip conservation, showdown reveals, timeout forfeiture, daily/debit/credit behavior, and the full Discord game loop with fake Discord objects.
+The store tests need `DATABASE_URL` (or `TEST_DATABASE_URL`) pointing at PostgreSQL; they create and drop an isolated temporary schema. They are skipped when no database is configured. The suite covers deck determinism, heads-up blinds/action order, raise validation, all-in side-pot chip conservation, showdown reveals, timeout forfeiture, daily/debit/credit behavior, and the full Discord game loop with fake Discord objects.
 
 ## Credits
 

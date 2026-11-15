@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from io import BytesIO
 
 import discord
@@ -20,6 +21,25 @@ from .visuals import render_help_chart
 
 EMBED_COLOR = 0x145A43
 GOLD = 0xE8BC5C
+
+_RAISE_PATTERN = re.compile(r"(?:raise|bet)(?:\s+to)?\s+(\d[\d,]*)")
+
+
+def parse_action(content: str) -> tuple[str, int | None] | None:
+    """Parse an exact chat action, returning ``None`` for anything else."""
+    text = " ".join(content.strip().lower().split())
+    if text in {"fold", "check", "call"}:
+        return text, None
+    if text in {"all in", "all-in", "allin"}:
+        return "allin", None
+
+    match = _RAISE_PATTERN.fullmatch(text)
+    if match is None:
+        return None
+    amount = int(match.group(1).replace(",", ""))
+    if amount <= 0:
+        return None
+    return "raise", amount
 
 
 class PokerCog(commands.Cog):
@@ -117,7 +137,9 @@ class PokerCog(commands.Cog):
                 "Type `start game` — host starts the game\n"
                 "`/cards` — privately re-check your hole cards and best hand\n"
                 "`/endgame` — host or server admin closes the table and cashes out\n"
-                "During a hand: use the **Fold / Check / Call / Raise / All-in** buttons."
+                "During a hand, type exactly one of: `check`, `call`, "
+                "`raise <amount>`, `all in`, or `fold`.\n"
+                "The **Fold / Check / Call / Raise / All-in** buttons also work."
             ),
             inline=False,
         )
@@ -257,11 +279,26 @@ class PokerCog(commands.Cog):
         if not isinstance(message.channel, discord.TextChannel):
             return
 
-        text = message.content.strip().lower()
+        text = " ".join(message.content.strip().lower().split())
+        game = self.bot.games.get(message.channel.id)
+
         if text not in {"join game", "start game"}:
+            action = parse_action(message.content)
+            if action is None or game is None or game.state != "running":
+                return
+            action_name, amount = action
+            ok, response = await game.submit_action(
+                message.author, action_name, amount
+            )
+            if not ok:
+                await message.reply(response, mention_author=False)
+                return
+            try:
+                await message.add_reaction("✅")
+            except discord.HTTPException:
+                await message.reply(response, mention_author=False)
             return
 
-        game = self.bot.games.get(message.channel.id)
         if game is None:
             await message.reply(
                 "There is no poker game here yet. Use `/creategame` to open one.",
