@@ -6,14 +6,14 @@ A Python Discord bot for no-limit Texas Hold'em with persistent chip wallets, da
 
 ## Features
 
-- **`/profile`** — your avatar, username, wallet, daily availability/cooldown, and poker progress: games played, hands played, hands won, hand win rate, biggest pot won, and net chips.
+- **`/profile [user]`** — view your own or another player's avatar, username, wallet, daily availability/cooldown, and poker progress: games played, hands played, hands won, hand win rate, biggest pot won, and net chips.
 - **`/daily`** — claim **1,000** chips once per UTC day.
 - **`/creategame [buy_in]`** — opens a table in the channel and joins the host automatically. The buy-in (default **500**) becomes the host's starting stack.
 - **`join game`** — typed in the channel, or use the **Join game** button. Does nothing if no table exists.
 - **`start game`** — the host starts the game by typing this or pressing **Start game**.
 - **Full no-limit Hold'em** — blinds, four betting rounds, all-ins, side pots, split pots, min-raise rules, and showdowns are handled by [PokerKit](https://github.com/uoftcprg/pokerkit).
 - **Chat actions** — during your turn, type exactly `check`, `call`, `raise <amount>`, `all in`, or `fold` in the channel. Partial messages such as `call now` are ignored. The action buttons still work.
-- **Private cards** — a **View my cards** button appears in the channel at the start of every hand. Pressing it (or using `/cards`) shows your hole cards and current best hand in an ephemeral reply that only you can see. No DMs required.
+- **Private cards** — a **View my cards** button appears in the channel at the start of every hand. Pressing it (or using `/cards`) shows your hole cards and current best hand in an ephemeral reply that only you can see. No DMs required. All other bot messages are public by default.
 - **Public table** — a rendered table image shows stacks, bets, the button, community cards, pot, folded/removed players, and hole cards only at showdown.
 - **Turn timer** — each player has **60 seconds**. Missing the deadline auto-folds.
 - **Timeout removal** — after more than **3** timeouts (the 4th), the player is removed from the table and their remaining stack is forfeited to the pot.
@@ -72,7 +72,7 @@ Requires **Python 3.11+** and a **PostgreSQL** database.
 | Command | Who | What it does |
 | --- | --- | --- |
 | `/daily` | everyone | Claims 1,000 chips once per UTC day and shows your balance. |
-| `/profile` | everyone | Shows your avatar, username, wallet, daily status or cooldown, and poker stats (games, hands, hand wins/rate, biggest pot, net chips). |
+| `/profile [user]` | everyone | Shows your profile, or another member's, including avatar, username, wallet, daily status/cooldown, and poker stats (games, hands, hand wins/rate, biggest pot, net chips). Public message. |
 | `/help` | everyone | Rules, command list, and a generated hand-ranking chart. |
 | `/creategame [buy_in]` | everyone | Opens a table. Buy-in range is 100–100,000; default 500. One table per channel. |
 | `join game` (typed) | everyone | Joins the lobby. Requires enough chips; the buy-in is deducted. |

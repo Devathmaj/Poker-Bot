@@ -3,11 +3,21 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 
 import psycopg
 from psycopg.rows import dict_row
+
+logger = logging.getLogger(__name__)
+
+# Errors that mean "the socket is gone", not "the query is wrong". A pooled
+# Postgres endpoint (Supabase, PgBouncer, ...) closes idle sessions, and the
+# first statement after that fails even though the connection object still
+# reports itself as open.
+_CONNECTION_ERRORS = (psycopg.OperationalError, psycopg.InterfaceError)
 
 _SCHEMAS = (
     """
@@ -79,18 +89,41 @@ class ChipStore:
         self._create_tables()
         self._lock = asyncio.Lock()
 
-    def _create_tables(self) -> None:
+    def _create_tables(
+        self, connection: psycopg.Connection | None = None
+    ) -> None:
+        connection = connection or self._connection
         for schema in _SCHEMAS:
-            self._connection.execute(schema)
-        self._connection.commit()
+            connection.execute(schema)
+        connection.commit()
 
     def _connect(self) -> psycopg.Connection:
-        return psycopg.connect(self._database_url, row_factory=dict_row)
+        return psycopg.connect(
+            self._database_url,
+            row_factory=dict_row,
+            application_name="pokerbot",
+            connect_timeout=10,
+            # Keep the pooled session alive so an idle game does not lose its
+            # connection while nobody is claiming chips.
+            keepalives=1,
+            keepalives_idle=30,
+            keepalives_interval=10,
+            keepalives_count=5,
+        )
+
+    def _reconnect(self) -> None:
+        with suppress(Exception):
+            self._connection.close()
+        connection = self._connect()
+        self._create_tables(connection)
+        self._connection = connection
 
     def _ensure_connection(self) -> None:
-        if self._connection.closed:
-            self._connection = self._connect()
-            self._create_tables()
+        # ``closed`` is only set once psycopg notices; ``broken`` catches a
+        # server-side session that was killed while the object looked healthy.
+        if self._connection.closed or self._connection.broken:
+            logger.warning("Database connection is gone; reconnecting")
+            self._reconnect()
 
     async def _call(self, function, *args):
         async with self._lock:
@@ -98,7 +131,15 @@ class ChipStore:
 
     def _run(self, function, *args):
         self._ensure_connection()
-        return function(*args)
+        try:
+            return function(*args)
+        except _CONNECTION_ERRORS as exc:
+            # The session dropped between the check above and the statement.
+            # Nothing was committed, so it is safe to retry once on a fresh
+            # connection instead of failing the Discord interaction.
+            logger.warning("Database statement failed (%s); retrying once", exc)
+            self._reconnect()
+            return function(*args)
 
     # ------------------------------------------------------------------ reads
     def _balance(self, user_id: int) -> int:

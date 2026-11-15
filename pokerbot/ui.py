@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from io import BytesIO
 from typing import TYPE_CHECKING
 
@@ -13,8 +14,40 @@ from .config import TURN_SECONDS
 if TYPE_CHECKING:
     from .game import PokerGame
 
+logger = logging.getLogger(__name__)
 
-class LobbyView(discord.ui.View):
+
+async def _report_component_error(interaction: discord.Interaction) -> None:
+    """Send a fallback answer so Discord never shows "did not respond"."""
+    message = (
+        "Something went wrong with that button. It has been logged — "
+        "please try again."
+    )
+    try:
+        if interaction.response.is_done():
+            await interaction.followup.send(message, ephemeral=True)
+        else:
+            await interaction.response.send_message(message, ephemeral=True)
+    except discord.HTTPException:
+        logger.debug("Could not deliver the component error", exc_info=True)
+
+
+class PokerView(discord.ui.View):
+    """Base view that answers the interaction when a callback raises."""
+
+    async def on_error(
+        self,
+        interaction: discord.Interaction,
+        error: Exception,
+        item: discord.ui.Item,
+    ) -> None:
+        logger.error(
+            "Button %s failed", getattr(item, "label", "?"), exc_info=error
+        )
+        await _report_component_error(interaction)
+
+
+class LobbyView(PokerView):
     def __init__(self, game: PokerGame) -> None:
         super().__init__(timeout=None)
         self.game = game
@@ -26,12 +59,12 @@ class LobbyView(discord.ui.View):
             or interaction.message.id != self.game.lobby_message.id
         ):
             await interaction.response.send_message(
-                "This lobby is no longer active.", ephemeral=True
+                "This lobby is no longer active."
             )
             return False
         if self.game.state != "lobby":
             await interaction.response.send_message(
-                "This game has already started.", ephemeral=True
+                "This game has already started."
             )
             return False
         return True
@@ -42,9 +75,9 @@ class LobbyView(discord.ui.View):
     ) -> None:
         if not await self._valid(interaction):
             return
-        await interaction.response.defer(ephemeral=True)
+        await interaction.response.defer()
         _ok, message = await self.game.join(interaction.user)
-        await interaction.followup.send(message, ephemeral=True)
+        await interaction.followup.send(message)
 
     @discord.ui.button(label="Start game", style=discord.ButtonStyle.primary)
     async def start(
@@ -54,15 +87,15 @@ class LobbyView(discord.ui.View):
             return
         if interaction.user.id != self.game.host_id:
             await interaction.response.send_message(
-                "Only the host can start the game.", ephemeral=True
+                "Only the host can start the game."
             )
             return
-        await interaction.response.defer(ephemeral=True)
+        await interaction.response.defer()
         _ok, message = await self.game.start(interaction.user)
-        await interaction.followup.send(message, ephemeral=True)
+        await interaction.followup.send(message)
 
 
-class CardsView(discord.ui.View):
+class CardsView(PokerView):
     """Button on the public table that reveals cards only to the presser."""
 
     def __init__(self, game: PokerGame) -> None:
@@ -112,10 +145,16 @@ class RaiseModal(discord.ui.Modal, title="Raise the bet"):
         self.user = user
         self.amount.placeholder = f"{minimum:,} – {maximum:,}"
 
+    async def on_error(
+        self, interaction: discord.Interaction, error: Exception
+    ) -> None:
+        logger.error("Raise modal failed", exc_info=error)
+        await _report_component_error(interaction)
+
     async def on_submit(self, interaction: discord.Interaction) -> None:
         if interaction.user.id != self.user.id:
             await interaction.response.send_message(
-                "This raise window belongs to another player.", ephemeral=True
+                "This raise window belongs to another player."
             )
             return
         raw = str(self.amount.value).replace(",", "").replace(" ", "").strip()
@@ -123,18 +162,18 @@ class RaiseModal(discord.ui.Modal, title="Raise the bet"):
             value = int(raw)
         except ValueError:
             await interaction.response.send_message(
-                "Enter a whole number of chips.", ephemeral=True
+                "Enter a whole number of chips."
             )
             return
 
-        await interaction.response.defer(ephemeral=True)
+        await interaction.response.defer()
         _ok, message = await self.game.submit_action(
             interaction.user, "raise", value
         )
-        await interaction.followup.send(message, ephemeral=True)
+        await interaction.followup.send(message)
 
 
-class ActionView(discord.ui.View):
+class ActionView(PokerView):
     def __init__(self, game: PokerGame) -> None:
         super().__init__(timeout=TURN_SECONDS + 20)
         self.game = game
@@ -183,9 +222,7 @@ class ActionView(discord.ui.View):
 
     async def _guard(self, interaction: discord.Interaction) -> bool:
         if self.game.state != "running":
-            await interaction.response.send_message(
-                "This game has ended.", ephemeral=True
-            )
+            await interaction.response.send_message("This game has ended.")
             return False
         if (
             self.game.table_message is None
@@ -193,22 +230,20 @@ class ActionView(discord.ui.View):
             or interaction.message.id != self.game.table_message.id
         ):
             await interaction.response.send_message(
-                "This table view is out of date.", ephemeral=True
+                "This table view is out of date."
             )
             return False
         if not self.game.is_pending_actor(interaction.user.id):
-            await interaction.response.send_message(
-                "It is not your turn.", ephemeral=True
-            )
+            await interaction.response.send_message("It is not your turn.")
             return False
         return True
 
     async def _submit(self, interaction: discord.Interaction, action: str) -> None:
         if not await self._guard(interaction):
             return
-        await interaction.response.defer(ephemeral=True)
+        await interaction.response.defer()
         _ok, message = await self.game.submit_action(interaction.user, action)
-        await interaction.followup.send(message, ephemeral=True)
+        await interaction.followup.send(message)
 
     async def _raise(self, interaction: discord.Interaction) -> None:
         if not await self._guard(interaction):
@@ -216,7 +251,7 @@ class ActionView(discord.ui.View):
         bounds = self.game.raise_bounds(interaction.user.id)
         if bounds is None:
             await interaction.response.send_message(
-                "You cannot raise right now.", ephemeral=True
+                "You cannot raise right now."
             )
             return
         minimum, maximum = bounds

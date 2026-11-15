@@ -52,6 +52,11 @@ class PokerCog(commands.Cog):
         description=f"Claim {DAILY_CHIPS:,} chips once per UTC day.",
     )
     async def daily(self, interaction: discord.Interaction) -> None:
+        # Acknowledge before touching the database. Discord only gives an
+        # interaction three seconds, and the wallet lives on a remote
+        # PostgreSQL host, so an un-acknowledged query shows up in Discord as
+        # "The application did not respond".
+        await interaction.response.defer()
         claim = await self.bot.store.claim_daily(
             interaction.user.id, DAILY_CHIPS
         )
@@ -81,23 +86,29 @@ class PokerCog(commands.Cog):
             embed.add_field(
                 name="Balance", value=f"**{claim.balance:,}** chips", inline=True
             )
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.followup.send(embed=embed)
 
     # ----------------------------------------------------------------- profile
     @app_commands.command(
         name="profile",
-        description="View your poker profile, daily status, and progress.",
+        description="View your poker profile, or another player's profile.",
     )
-    async def profile(self, interaction: discord.Interaction) -> None:
-        await interaction.response.defer(ephemeral=True)
-        data = await self.bot.store.profile(interaction.user.id)
+    @app_commands.describe(user="View another player's profile (optional).")
+    async def profile(
+        self,
+        interaction: discord.Interaction,
+        user: discord.User | None = None,
+    ) -> None:
+        target = user or interaction.user
+        await interaction.response.defer()
+        data = await self.bot.store.profile(target.id)
 
         embed = discord.Embed(
-            title=f"♠ {interaction.user.display_name}'s Poker Profile",
-            description=f"`{interaction.user}`",
+            title=f"♠ {target.display_name}'s Poker Profile",
+            description=f"`{target}`",
             color=EMBED_COLOR,
         )
-        embed.set_thumbnail(url=interaction.user.display_avatar.url)
+        embed.set_thumbnail(url=target.display_avatar.url)
         embed.add_field(
             name="Wallet", value=f"**{data.balance:,}** chips", inline=True
         )
@@ -130,8 +141,13 @@ class PokerCog(commands.Cog):
             value=f"{data.net_chips:+,} chips",
             inline=True,
         )
-        embed.set_footer(text="Poker stats are tracked as you play hands.")
-        await interaction.followup.send(embed=embed, ephemeral=True)
+        embed.set_footer(
+            text=(
+                f"Requested by {interaction.user.display_name} · "
+                "stats update as hands finish"
+            )
+        )
+        await interaction.followup.send(embed=embed)
 
     # ------------------------------------------------------------------- help
     @app_commands.command(
@@ -182,7 +198,7 @@ class PokerCog(commands.Cog):
             name="Commands",
             value=(
                 "`/daily` — claim chips\n"
-                "`/profile` — your avatar, username, daily status, and poker stats\n"
+                "`/profile [user]` — view your or another player's profile\n"
                 "`/creategame [buy_in]` — open a table (host joins automatically)\n"
                 "Type `join game` — take a seat in the lobby\n"
                 "Type `start game` — host starts the game\n"
@@ -190,7 +206,8 @@ class PokerCog(commands.Cog):
                 "`/endgame` — host or server admin closes the table and cashes out\n"
                 "During a hand, type exactly one of: `check`, `call`, "
                 "`raise <amount>`, `all in`, or `fold`.\n"
-                "The **Fold / Check / Call / Raise / All-in** buttons also work."
+                "The **Fold / Check / Call / Raise / All-in** buttons also work.\n"
+                "Only dealt hole cards are private; everything else is public."
             ),
             inline=False,
         )
@@ -224,12 +241,12 @@ class PokerCog(commands.Cog):
         interaction: discord.Interaction,
         buy_in: app_commands.Range[int, MIN_BUY_IN, MAX_BUY_IN] = DEFAULT_BUY_IN,
     ) -> None:
-        await interaction.response.defer(ephemeral=True)
+        await interaction.response.defer()
         if interaction.guild is None or not isinstance(
             interaction.channel, discord.TextChannel
         ):
             await interaction.followup.send(
-                "Create games in a normal server text channel.", ephemeral=True
+                "Create games in a normal server text channel."
             )
             return
 
@@ -237,16 +254,13 @@ class PokerCog(commands.Cog):
             self.bot, interaction.channel, interaction.user, buy_in
         )
         if error:
-            await interaction.followup.send(error, ephemeral=True)
+            await interaction.followup.send(error)
             return
 
         await interaction.followup.send(
-            (
-                f"♠ Table created with a **{buy_in:,}** chip buy-in and blinds "
-                f"**{game.small_blind:,}/{game.big_blind:,}**.\n"
-                "Others can type `join game` or press **Join game**."
-            ),
-            ephemeral=True,
+            f"♠ Table created with a **{buy_in:,}** chip buy-in and blinds "
+            f"**{game.small_blind:,}/{game.big_blind:,}**.\n"
+            "Others can type `join game` or press **Join game**."
         )
 
     @app_commands.command(
@@ -254,17 +268,15 @@ class PokerCog(commands.Cog):
         description="End the table immediately (host or server admin).",
     )
     async def endgame(self, interaction: discord.Interaction) -> None:
-        await interaction.response.defer(ephemeral=True)
+        await interaction.response.defer()
         if interaction.guild is None or interaction.channel is None:
-            await interaction.followup.send(
-                "There is no table here.", ephemeral=True
-            )
+            await interaction.followup.send("There is no table here.")
             return
 
         game = self.bot.games.get(interaction.channel.id)
         if game is None:
             await interaction.followup.send(
-                "There is no active poker game in this channel.", ephemeral=True
+                "There is no active poker game in this channel."
             )
             return
 
@@ -277,7 +289,7 @@ class PokerCog(commands.Cog):
         )
         if interaction.user.id != game.host_id and not is_admin:
             await interaction.followup.send(
-                "Only the host or a server admin can end this game.", ephemeral=True
+                "Only the host or a server admin can end this game."
             )
             return
 
@@ -286,13 +298,10 @@ class PokerCog(commands.Cog):
         )
         if ended:
             await interaction.followup.send(
-                "The table was closed and remaining stacks were cashed out.",
-                ephemeral=True,
+                "The table was closed and remaining stacks were cashed out."
             )
         else:
-            await interaction.followup.send(
-                "That game has already ended.", ephemeral=True
-            )
+            await interaction.followup.send("That game has already ended.")
 
     @app_commands.command(
         name="cards",
