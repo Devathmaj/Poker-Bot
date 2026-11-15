@@ -11,7 +11,6 @@ CARDS_DIR = ASSETS_DIR / "cards"
 
 # Chips
 DAILY_CHIPS = 1_000
-DAILY_COOLDOWN_HOURS = 24
 DEFAULT_BUY_IN = 500
 MIN_BUY_IN = 100
 MAX_BUY_IN = 100_000
@@ -31,7 +30,6 @@ DB_PATH = Path(os.getenv("POKER_DB_PATH", BASE_DIR / "data" / "chips.sqlite3"))
 
 # Discord
 GUILD_ID = os.getenv("GUILD_ID")
-DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 
 
 def blinds_for_buy_in(buy_in: int) -> tuple[int, int]:

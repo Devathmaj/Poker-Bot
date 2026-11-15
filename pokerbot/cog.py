@@ -1,0 +1,281 @@
+"""Slash commands and channel listeners."""
+
+from __future__ import annotations
+
+import asyncio
+from io import BytesIO
+
+import discord
+from discord import app_commands
+from discord.ext import commands
+
+from .config import (
+    DAILY_CHIPS,
+    DEFAULT_BUY_IN,
+    MAX_BUY_IN,
+    MIN_BUY_IN,
+)
+from .game import PokerGame
+from .visuals import render_help_chart
+
+EMBED_COLOR = 0x145A43
+GOLD = 0xE8BC5C
+
+
+class PokerCog(commands.Cog):
+    def __init__(self, bot: commands.Bot) -> None:
+        self.bot = bot
+
+    # ---------------------------------------------------------------- economy
+    @app_commands.command(
+        name="daily",
+        description=f"Claim {DAILY_CHIPS:,} chips once per UTC day.",
+    )
+    async def daily(self, interaction: discord.Interaction) -> None:
+        claim = await self.bot.store.claim_daily(
+            interaction.user.id, DAILY_CHIPS
+        )
+        if claim.claimed:
+            embed = discord.Embed(
+                title="💰 Daily chips claimed",
+                description=f"You received **{DAILY_CHIPS:,}** chips.",
+                color=GOLD,
+            )
+            embed.add_field(
+                name="Balance", value=f"**{claim.balance:,}** chips", inline=True
+            )
+            embed.add_field(
+                name="Next claim",
+                value=f"<t:{int(claim.next_claim.timestamp())}:R>",
+                inline=True,
+            )
+        else:
+            embed = discord.Embed(
+                title="Daily already claimed",
+                description=(
+                    f"You already collected today's chips.\n"
+                    f"Next claim: <t:{int(claim.next_claim.timestamp())}:R>"
+                ),
+                color=EMBED_COLOR,
+            )
+            embed.add_field(
+                name="Balance", value=f"**{claim.balance:,}** chips", inline=True
+            )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    # ------------------------------------------------------------------- help
+    @app_commands.command(
+        name="help",
+        description="Texas Hold'em rules, commands, and a hand-ranking chart.",
+    )
+    async def help(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer()
+        embed = discord.Embed(
+            title="♠ Texas Hold'em — Rules & Commands",
+            description=(
+                "**Goal:** Make the best five-card hand from your two private "
+                "hole cards and the five shared community cards."
+            ),
+            color=EMBED_COLOR,
+        )
+        embed.add_field(
+            name="The hand",
+            value=(
+                "Everyone gets two hole cards. The dealer reveals the flop "
+                "(3 cards), turn (1), then river (1). There are four betting "
+                "rounds: pre-flop, flop, turn, river."
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Betting",
+            value=(
+                "No-limit. On your turn you can **Fold**, **Check/Call**, "
+                "**Raise**, or go **All-in**. A raise must be at least the big "
+                "blind (or the size of the previous raise). Side pots and "
+                "all-ins are handled automatically."
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Chips",
+            value=(
+                f"Use `/daily` once per UTC day for **{DAILY_CHIPS:,}** chips. "
+                f"`/creategame [buy_in]` opens a table and takes the buy-in "
+                f"(default {DEFAULT_BUY_IN:,}). Buy-in chips become your stack; "
+                "at the end of the game your remaining stack is paid back to "
+                "your wallet. Win a pot and keep the chips."
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Commands",
+            value=(
+                "`/daily` — claim chips\n"
+                "`/creategame [buy_in]` — open a table (host joins automatically)\n"
+                "Type `join game` — take a seat in the lobby\n"
+                "Type `start game` — host starts the game\n"
+                "`/cards` — privately re-check your hole cards and best hand\n"
+                "`/endgame` — host or server admin closes the table and cashes out\n"
+                "During a hand: use the **Fold / Check / Call / Raise / All-in** buttons."
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Turn timer",
+            value=(
+                "You have **60 seconds** to act. If you miss it, you are "
+                "auto-folded. After more than **3 timeouts** you are removed "
+                "from the table and your remaining chips are forfeited to the pot."
+            ),
+            inline=False,
+        )
+        embed.set_image(url="attachment://hand-rankings.png")
+        embed.set_footer(text="Hand rankings are also shown below the commands.")
+        image = await asyncio.to_thread(render_help_chart)
+        await interaction.followup.send(
+            embed=embed,
+            file=discord.File(BytesIO(image), filename="hand-rankings.png"),
+        )
+
+    # ------------------------------------------------------------------ table
+    @app_commands.command(
+        name="creategame",
+        description="Open a Texas Hold'em table in this channel.",
+    )
+    @app_commands.describe(
+        buy_in=f"Chips each player brings (default {DEFAULT_BUY_IN:,})."
+    )
+    async def creategame(
+        self,
+        interaction: discord.Interaction,
+        buy_in: app_commands.Range[int, MIN_BUY_IN, MAX_BUY_IN] = DEFAULT_BUY_IN,
+    ) -> None:
+        await interaction.response.defer(ephemeral=True)
+        if interaction.guild is None or not isinstance(
+            interaction.channel, discord.TextChannel
+        ):
+            await interaction.followup.send(
+                "Create games in a normal server text channel.", ephemeral=True
+            )
+            return
+
+        game, error = await PokerGame.create(
+            self.bot, interaction.channel, interaction.user, buy_in
+        )
+        if error:
+            await interaction.followup.send(error, ephemeral=True)
+            return
+
+        await interaction.followup.send(
+            (
+                f"♠ Table created with a **{buy_in:,}** chip buy-in and blinds "
+                f"**{game.small_blind:,}/{game.big_blind:,}**.\n"
+                "Others can type `join game` or press **Join game**."
+            ),
+            ephemeral=True,
+        )
+
+    @app_commands.command(
+        name="endgame",
+        description="End the table immediately (host or server admin).",
+    )
+    async def endgame(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True)
+        if interaction.guild is None or interaction.channel is None:
+            await interaction.followup.send(
+                "There is no table here.", ephemeral=True
+            )
+            return
+
+        game = self.bot.games.get(interaction.channel.id)
+        if game is None:
+            await interaction.followup.send(
+                "There is no active poker game in this channel.", ephemeral=True
+            )
+            return
+
+        is_admin = bool(
+            isinstance(interaction.user, discord.Member)
+            and (
+                interaction.user.guild_permissions.administrator
+                or interaction.user.guild_permissions.manage_guild
+            )
+        )
+        if interaction.user.id != game.host_id and not is_admin:
+            await interaction.followup.send(
+                "Only the host or a server admin can end this game.", ephemeral=True
+            )
+            return
+
+        ended = await game.end(
+            f"Game ended by <@{interaction.user.id}>."
+        )
+        if ended:
+            await interaction.followup.send(
+                "The table was closed and remaining stacks were cashed out.",
+                ephemeral=True,
+            )
+        else:
+            await interaction.followup.send(
+                "That game has already ended.", ephemeral=True
+            )
+
+    @app_commands.command(
+        name="cards",
+        description="Privately view your hole cards and current best hand.",
+    )
+    async def cards(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True)
+        if interaction.channel is None:
+            await interaction.followup.send("No table here.", ephemeral=True)
+            return
+        game = self.bot.games.get(interaction.channel.id)
+        if game is None:
+            await interaction.followup.send(
+                "There is no poker game in this channel.", ephemeral=True
+            )
+            return
+        data = game.cards_image(interaction.user.id)
+        if data is None:
+            await interaction.followup.send(
+                "You are not in a live hand right now.", ephemeral=True
+            )
+            return
+        image, label = data
+        await interaction.followup.send(
+            content=f"**Your hand:** {label}",
+            file=discord.File(BytesIO(image), filename="your-hand.png"),
+            ephemeral=True,
+        )
+
+    # --------------------------------------------------------------- listeners
+    @commands.Cog.listener()
+    async def on_message(self, message: discord.Message) -> None:
+        if message.author.bot or message.guild is None:
+            return
+        if not isinstance(message.channel, discord.TextChannel):
+            return
+
+        text = message.content.strip().lower()
+        if text not in {"join game", "start game"}:
+            return
+
+        game = self.bot.games.get(message.channel.id)
+        if game is None:
+            await message.reply(
+                "There is no poker game here yet. Use `/creategame` to open one.",
+                mention_author=False,
+            )
+            return
+
+        if text == "join game":
+            _ok, response = await game.join(message.author)
+        else:
+            _ok, response = await game.start(message.author)
+
+        await message.reply(
+            response,
+            mention_author=False,
+            allowed_mentions=discord.AllowedMentions(users=True),
+        )

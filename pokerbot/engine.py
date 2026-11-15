@@ -8,7 +8,7 @@ stacks, timeout forfeitures, and cashing a game out.
 from __future__ import annotations
 
 import secrets
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from random import Random
 
 from pokerkit import Automation, NoLimitTexasHoldem
@@ -35,33 +35,9 @@ class IllegalAction(Exception):
     """Raised when a player tries an action that is not currently legal."""
 
 
-def new_deck(rng: Random | None = None) -> list[str]:
-    """Return a shuffled 52-card deck as strings such as ``As`` or ``Td``."""
-    rng = rng or secrets.SystemRandom()
-    deck = [rank + suit for rank in RANKS for suit in SUITS]
-    rng.shuffle(deck)
-    return deck
-
-
-def card_name(code: str) -> str:
-    """Turn ``As`` into a readable ``Ace of Spades`` label."""
-    rank_names = {
-        "A": "Ace",
-        "K": "King",
-        "Q": "Queen",
-        "J": "Jack",
-        "T": "Ten",
-        "9": "Nine",
-        "8": "Eight",
-        "7": "Seven",
-        "6": "Six",
-        "5": "Five",
-        "4": "Four",
-        "3": "Three",
-        "2": "Two",
-    }
-    suit_names = {"s": "Spades", "h": "Hearts", "d": "Diamonds", "c": "Clubs"}
-    return f"{rank_names.get(code[0], code[0])} of {suit_names.get(code[-1], '?')}"
+def _card_code(card) -> str:
+    """Return the compact code for a PokerKit card (e.g. ``As``)."""
+    return f"{card.rank.value}{card.suit.value}"
 
 
 @dataclass
@@ -117,8 +93,8 @@ class Hand:
         self.big_blind = big_blind
         self.index = {player.user_id: i for i, player in enumerate(order)}
         self.start_stacks = {player.user_id: player.chips for player in order}
-        self.deck = new_deck(rng)
         self.complete = False
+        self.folded_users: set[int] = set()
 
         self.state = NoLimitTexasHoldem.create_state(
             _AUTOMATIONS,
@@ -129,14 +105,31 @@ class Hand:
             [player.chips for player in order],
             len(order),
         )
+
+        # PokerKit's own shuffle is not cryptographically secure. Rebuild the
+        # deck in canonical order, shuffle it with SystemRandom (or the RNG
+        # injected by tests), and let PokerKit draw from that one deck, so
+        # burns can never duplicate a dealt card.
+        rank_order = {rank: i for i, rank in enumerate(RANKS)}
+        deck = sorted(
+            self.state.deck_cards,
+            key=lambda card: (
+                rank_order[card.rank.value],
+                card.suit.value,
+            ),
+        )
+        (rng or secrets.SystemRandom()).shuffle(deck)
+        self.state.deck_cards.clear()
+        self.state.deck_cards.extend(deck)
+
         self._deal_hole_cards()
 
     # ------------------------------------------------------------------ setup
     def _deal_hole_cards(self) -> None:
         while self.state.can_deal_hole():
-            self.state.deal_hole(self.deck.pop())
+            self.state.deal_hole()
         self.hole_cards: dict[int, list[str]] = {
-            player.user_id: [repr(card) for card in self.state.hole_cards[i]]
+            player.user_id: [_card_code(card) for card in self.state.hole_cards[i]]
             for i, player in enumerate(self.order)
         }
 
@@ -147,7 +140,7 @@ class Hand:
 
     @property
     def board(self) -> list[str]:
-        return [repr(card) for card in self.state.board_cards]
+        return [_card_code(card) for card in self.state.get_board_cards(0)]
 
     @property
     def street(self) -> str:
@@ -183,39 +176,64 @@ class Hand:
         )
 
     # ---------------------------------------------------------------- actions
-    def act(self, user_id: int, action: str, amount: int | None = None) -> str:
-        """Apply an action and return a short human-readable description."""
+    def validate_action(
+        self, user_id: int, action: str, amount: int | None = None
+    ) -> None:
+        """Raise IllegalAction if the move is not currently legal."""
         if self.is_over:
             raise IllegalAction("This hand is already over.")
         if self.actor_id != user_id:
             raise IllegalAction("It is not that player's turn.")
 
         if action == "fold":
+            if not self.state.can_fold():
+                raise IllegalAction("You cannot fold right now.")
+            return
+        if action in {"check", "call"}:
+            if not self.state.can_check_or_call():
+                raise IllegalAction("You cannot check or call right now.")
+            return
+        if action == "raise":
+            legal = self.legal_actions()
+            if not legal.can_raise or legal.min_raise_to is None:
+                raise IllegalAction("Raising is not available right now.")
+            if amount is None:
+                raise IllegalAction("A raise amount is required.")
+            if legal.max_raise_to is None or not (
+                legal.min_raise_to <= amount <= legal.max_raise_to
+            ):
+                raise IllegalAction(
+                    f"Raise must be between {legal.min_raise_to:,} and "
+                    f"{legal.max_raise_to or legal.min_raise_to:,} chips."
+                )
+            if not self.state.can_complete_bet_or_raise_to(amount):
+                raise IllegalAction("That raise is not legal.")
+            return
+        if action == "allin":
+            if not (
+                self.state.can_check_or_call()
+                or self.state.can_complete_bet_or_raise_to()
+            ):
+                raise IllegalAction("You cannot move all-in right now.")
+            return
+        raise IllegalAction("Unknown action.")
+
+    def act(self, user_id: int, action: str, amount: int | None = None) -> str:
+        """Apply an action and return a short human-readable description."""
+        self.validate_action(user_id, action, amount)
+
+        if action == "fold":
             self.state.fold()
+            self.folded_users.add(user_id)
             return "folds"
 
         if action in {"check", "call"}:
             due = self.state.checking_or_calling_amount
-            if not self.state.can_check_or_call():
-                raise IllegalAction("You cannot check or call right now.")
             self.state.check_or_call()
             return f"calls {due:,}" if due else "checks"
 
         if action == "raise":
-            legal = self.legal_actions()
-            if not legal.can_raise:
-                raise IllegalAction("Raising is not available right now.")
-            if amount is None:
-                raise IllegalAction("A raise amount is required.")
-            if legal.min_raise_to is None or legal.max_raise_to is None:
-                raise IllegalAction("Raising is not available right now.")
-            if not legal.min_raise_to <= amount <= legal.max_raise_to:
-                raise IllegalAction(
-                    f"Raise must be between {legal.min_raise_to:,} and "
-                    f"{legal.max_raise_to:,} chips."
-                )
-            if not self.state.can_complete_bet_or_raise_to(amount):
-                raise IllegalAction("That raise is not legal.")
+            assert amount is not None
             self.state.complete_bet_or_raise_to(amount)
             return f"raises to {amount:,}"
 
@@ -236,9 +254,8 @@ class Hand:
             return None
         dealt: list[str] = []
         while self.state.can_deal_board():
-            card = self.deck.pop()
-            self.state.deal_board(card)
-            dealt.append(card)
+            operation = self.state.deal_board()
+            dealt.extend(_card_code(card) for card in operation.cards)
         return dealt
 
     # ----------------------------------------------------------------- finish
@@ -261,12 +278,14 @@ class Hand:
             key=lambda item: item[1],
             reverse=True,
         )
-        pot = sum(amount for _, amount in winners)
+        pot = self.state.total_pushed_amount
 
+        # PokerKit auto-mucks losing hands at showdown, so use our own fold
+        # tracking to know who actually reached showdown.
         revealed = [
             player.user_id
-            for i, player in enumerate(self.order)
-            if not self.state.folded_status[i]
+            for player in self.order
+            if player.user_id not in self.folded_users
         ]
         board = self.board
         labels: dict[int, str] = {}
@@ -274,7 +293,7 @@ class Hand:
             for user_id in revealed:
                 try:
                     hand = StandardHighHand.from_game(
-                        self.hole_cards[user_id], board
+                        "".join(self.hole_cards[user_id]), "".join(board)
                     )
                     labels[user_id] = hand.entry.label.value
                 except (ValueError, KeyError):
@@ -357,6 +376,7 @@ class Table:
 
         # A removed player's remaining stack is dead money. It is paid to the
         # winner(s) of the hand that was running when they were removed.
+        bonus_awards: dict[int, int] = {}
         if self.bonus_pot and result.winners:
             dead = self.bonus_pot
             share, remainder = divmod(dead, len(result.winners))
@@ -364,6 +384,8 @@ class Table:
                 (user_id, amount + share + (remainder if i == 0 else 0))
                 for i, (user_id, amount) in enumerate(result.winners)
             ]
+            for i, (user_id, amount) in enumerate(result.winners):
+                bonus_awards[user_id] = amount - result.net[user_id]
             result.dead_money = dead
         self.bonus_pot = 0
 
@@ -371,6 +393,7 @@ class Table:
             if player.user_id not in result.final_chips:
                 continue
             player.chips = 0 if player.kicked else result.final_chips[player.user_id]
+            player.chips += bonus_awards.get(player.user_id, 0)
 
         return result
 
@@ -393,18 +416,30 @@ class Table:
 
     def abort_refunds(self) -> dict[int, int]:
         """Cash everybody out. A live hand is voided and its bets returned."""
+        dead_money = self.bonus_pot
         if self.hand is not None and not self.hand.complete:
             eligible = [p for p in self.hand.order if not p.kicked]
             refunds = {
                 p.user_id: self.hand.start_stacks[p.user_id] for p in eligible
             }
+            # Voiding the hand also voids the pot. A kicked player's stack
+            # capture only covered their uncommitted chips, so add the chips
+            # they already put in the pot to the pool being shared out.
+            for player in self.hand.order:
+                if not player.kicked:
+                    continue
+                index = self.hand.index[player.user_id]
+                dead_money += (
+                    self.hand.start_stacks[player.user_id]
+                    - self.hand.state.stacks[index]
+                )
         else:
             eligible = [p for p in self.players if not p.kicked and p.chips > 0]
             refunds = {p.user_id: p.chips for p in eligible}
 
         # Any dead money is shared by the players who are still in the game.
-        if self.bonus_pot and refunds:
-            share, remainder = divmod(self.bonus_pot, len(refunds))
+        if dead_money and refunds:
+            share, remainder = divmod(dead_money, len(refunds))
             for i, user_id in enumerate(refunds):
                 refunds[user_id] += share + (remainder if i == 0 else 0)
         self.bonus_pot = 0
