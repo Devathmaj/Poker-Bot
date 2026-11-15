@@ -64,6 +64,12 @@ class MemoryStore:
         self.balances[user_id] = self.balances.get(user_id, 0) + amount
         return self.balances[user_id]
 
+    async def record_games_started(self, user_ids: list[int]) -> None:
+        pass
+
+    async def record_hand_stats(self, stats: list) -> None:
+        pass
+
     async def close(self) -> None:
         pass
 

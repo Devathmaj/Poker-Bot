@@ -9,13 +9,25 @@ from datetime import UTC, date, datetime, time, timedelta
 import psycopg
 from psycopg.rows import dict_row
 
-_SCHEMA = """
-CREATE TABLE IF NOT EXISTS users (
-    user_id BIGINT PRIMARY KEY,
-    chips BIGINT NOT NULL DEFAULT 0,
-    last_daily DATE
+_SCHEMAS = (
+    """
+    CREATE TABLE IF NOT EXISTS users (
+        user_id BIGINT PRIMARY KEY,
+        chips BIGINT NOT NULL DEFAULT 0,
+        last_daily DATE
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS player_stats (
+        user_id BIGINT PRIMARY KEY,
+        games_played BIGINT NOT NULL DEFAULT 0,
+        hands_played BIGINT NOT NULL DEFAULT 0,
+        hands_won BIGINT NOT NULL DEFAULT 0,
+        biggest_pot BIGINT NOT NULL DEFAULT 0,
+        net_chips BIGINT NOT NULL DEFAULT 0
+    )
+    """,
 )
-"""
 
 
 @dataclass(frozen=True)
@@ -23,6 +35,32 @@ class DailyClaim:
     claimed: bool
     balance: int
     next_claim: datetime
+
+
+@dataclass(frozen=True)
+class HandStat:
+    user_id: int
+    won: bool
+    pot_won: int
+    net: int
+
+
+@dataclass(frozen=True)
+class ProfileData:
+    balance: int
+    can_claim_daily: bool
+    next_claim: datetime
+    games_played: int
+    hands_played: int
+    hands_won: int
+    biggest_pot: int
+    net_chips: int
+
+    @property
+    def hand_win_rate(self) -> float:
+        if not self.hands_played:
+            return 0.0
+        return self.hands_won / self.hands_played
 
 
 class ChipStore:
@@ -38,9 +76,13 @@ class ChipStore:
             database_url = "postgresql://" + database_url[len("postgres://") :]
         self._database_url = database_url
         self._connection = self._connect()
-        self._connection.execute(_SCHEMA)
-        self._connection.commit()
+        self._create_tables()
         self._lock = asyncio.Lock()
+
+    def _create_tables(self) -> None:
+        for schema in _SCHEMAS:
+            self._connection.execute(schema)
+        self._connection.commit()
 
     def _connect(self) -> psycopg.Connection:
         return psycopg.connect(self._database_url, row_factory=dict_row)
@@ -48,8 +90,7 @@ class ChipStore:
     def _ensure_connection(self) -> None:
         if self._connection.closed:
             self._connection = self._connect()
-            self._connection.execute(_SCHEMA)
-            self._connection.commit()
+            self._create_tables()
 
     async def _call(self, function, *args):
         async with self._lock:
@@ -142,6 +183,90 @@ class ChipStore:
     ) -> DailyClaim:
         today = today or datetime.now(UTC).date()
         return await self._call(self._claim_daily, user_id, amount, today)
+
+    # ------------------------------------------------------------------ stats
+    def _record_games_started(self, user_ids: list[int]) -> None:
+        with self._connection.transaction():
+            for user_id in user_ids:
+                self._connection.execute(
+                    "INSERT INTO users (user_id, chips) VALUES (%s, 0) "
+                    "ON CONFLICT (user_id) DO NOTHING",
+                    (user_id,),
+                )
+                self._connection.execute(
+                    "INSERT INTO player_stats (user_id, games_played) "
+                    "VALUES (%s, 1) "
+                    "ON CONFLICT (user_id) DO UPDATE "
+                    "SET games_played = player_stats.games_played + 1",
+                    (user_id,),
+                )
+
+    async def record_games_started(self, user_ids: list[int]) -> None:
+        await self._call(self._record_games_started, user_ids)
+
+    def _record_hand_stats(self, stats: list[HandStat]) -> None:
+        with self._connection.transaction():
+            for stat in stats:
+                self._connection.execute(
+                    "INSERT INTO users (user_id, chips) VALUES (%s, 0) "
+                    "ON CONFLICT (user_id) DO NOTHING",
+                    (stat.user_id,),
+                )
+                self._connection.execute(
+                    "INSERT INTO player_stats "
+                    "(user_id, hands_played, hands_won, biggest_pot, net_chips) "
+                    "VALUES (%s, 1, %s, %s, %s) "
+                    "ON CONFLICT (user_id) DO UPDATE SET "
+                    "hands_played = player_stats.hands_played + 1, "
+                    "hands_won = player_stats.hands_won + EXCLUDED.hands_won, "
+                    "biggest_pot = GREATEST("
+                    "player_stats.biggest_pot, EXCLUDED.biggest_pot), "
+                    "net_chips = player_stats.net_chips + EXCLUDED.net_chips",
+                    (
+                        stat.user_id,
+                        int(stat.won),
+                        stat.pot_won,
+                        stat.net,
+                    ),
+                )
+
+    async def record_hand_stats(self, stats: list[HandStat]) -> None:
+        await self._call(self._record_hand_stats, stats)
+
+    # ---------------------------------------------------------------- profile
+    def _profile(self, user_id: int, today: date) -> ProfileData:
+        row = self._connection.execute(
+            "SELECT u.chips, u.last_daily, "
+            "COALESCE(s.games_played, 0) AS games_played, "
+            "COALESCE(s.hands_played, 0) AS hands_played, "
+            "COALESCE(s.hands_won, 0) AS hands_won, "
+            "COALESCE(s.biggest_pot, 0) AS biggest_pot, "
+            "COALESCE(s.net_chips, 0) AS net_chips "
+            "FROM users u LEFT JOIN player_stats s "
+            "ON s.user_id = u.user_id WHERE u.user_id = %s",
+            (user_id,),
+        ).fetchone()
+        next_claim = datetime.combine(
+            today + timedelta(days=1), time.min, tzinfo=UTC
+        )
+        if row is None:
+            return ProfileData(0, True, next_claim, 0, 0, 0, 0, 0)
+        return ProfileData(
+            balance=int(row["chips"]),
+            can_claim_daily=row["last_daily"] != today,
+            next_claim=next_claim,
+            games_played=int(row["games_played"]),
+            hands_played=int(row["hands_played"]),
+            hands_won=int(row["hands_won"]),
+            biggest_pot=int(row["biggest_pot"]),
+            net_chips=int(row["net_chips"]),
+        )
+
+    async def profile(
+        self, user_id: int, today: date | None = None
+    ) -> ProfileData:
+        today = today or datetime.now(UTC).date()
+        return await self._call(self._profile, user_id, today)
 
     async def close(self) -> None:
         async with self._lock:

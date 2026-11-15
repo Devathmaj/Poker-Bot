@@ -83,6 +83,56 @@ class PokerCog(commands.Cog):
             )
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
+    # ----------------------------------------------------------------- profile
+    @app_commands.command(
+        name="profile",
+        description="View your poker profile, daily status, and progress.",
+    )
+    async def profile(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True)
+        data = await self.bot.store.profile(interaction.user.id)
+
+        embed = discord.Embed(
+            title=f"♠ {interaction.user.display_name}'s Poker Profile",
+            description=f"`{interaction.user}`",
+            color=EMBED_COLOR,
+        )
+        embed.set_thumbnail(url=interaction.user.display_avatar.url)
+        embed.add_field(
+            name="Wallet", value=f"**{data.balance:,}** chips", inline=True
+        )
+        if data.can_claim_daily:
+            daily = "✅ Ready — use `/daily`"
+        else:
+            daily = f"⏳ <t:{int(data.next_claim.timestamp())}:R>"
+        embed.add_field(name="Daily", value=daily, inline=True)
+        embed.add_field(
+            name="Games played", value=f"{data.games_played:,}", inline=True
+        )
+        embed.add_field(
+            name="Hands played", value=f"{data.hands_played:,}", inline=True
+        )
+        embed.add_field(
+            name="Hands won", value=f"{data.hands_won:,}", inline=True
+        )
+        embed.add_field(
+            name="Hand win rate",
+            value=f"{data.hand_win_rate * 100:.1f}%",
+            inline=True,
+        )
+        embed.add_field(
+            name="Biggest pot won",
+            value=f"{data.biggest_pot:,}",
+            inline=True,
+        )
+        embed.add_field(
+            name="Net chips",
+            value=f"{data.net_chips:+,} chips",
+            inline=True,
+        )
+        embed.set_footer(text="Poker stats are tracked as you play hands.")
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
     # ------------------------------------------------------------------- help
     @app_commands.command(
         name="help",
@@ -132,6 +182,7 @@ class PokerCog(commands.Cog):
             name="Commands",
             value=(
                 "`/daily` — claim chips\n"
+                "`/profile` — your avatar, username, daily status, and poker stats\n"
                 "`/creategame [buy_in]` — open a table (host joins automatically)\n"
                 "Type `join game` — take a seat in the lobby\n"
                 "Type `start game` — host starts the game\n"

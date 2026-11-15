@@ -23,6 +23,7 @@ from .config import (
     blinds_for_buy_in,
 )
 from .engine import Hand, HandResult, IllegalAction, Player, Table
+from .store import HandStat
 from .ui import ActionView, CardsView, LobbyView
 from .visuals import PlayerVisual, TableVisual, render_hole_cards, render_table
 
@@ -230,6 +231,13 @@ class PokerGame:
             return False, f"You need at least {MIN_PLAYERS} players to start."
 
         self.state = "running"
+        try:
+            await self.bot.store.record_games_started(
+                [player.user_id for player in self.table.players]
+            )
+        except Exception:
+            logger.exception("Could not record games started")
+
         if self.lobby_message is not None:
             with suppress(discord.HTTPException):
                 await self.lobby_message.edit(
@@ -271,6 +279,7 @@ class PokerGame:
                     return
 
                 result = self.table.finish_hand()
+                await self._record_hand_stats(hand, result)
                 await self._announce_result(result)
 
                 if len(self.table.active_players()) < MIN_PLAYERS:
@@ -391,6 +400,26 @@ class PokerGame:
 
         if not hand.is_over:
             await asyncio.sleep(0.8)
+
+    async def _record_hand_stats(
+        self, hand: Hand, result: HandResult
+    ) -> None:
+        winners = {user_id for user_id, _ in result.winners}
+        pot = result.pot + result.dead_money
+        stats = [
+            HandStat(
+                user_id=player.user_id,
+                won=player.user_id in winners,
+                pot_won=pot if player.user_id in winners else 0,
+                net=player.chips
+                - hand.start_stacks.get(player.user_id, player.chips),
+            )
+            for player in hand.order
+        ]
+        try:
+            await self.bot.store.record_hand_stats(stats)
+        except Exception:
+            logger.exception("Could not record hand stats")
 
     async def _announce_result(self, result: HandResult) -> None:
         await self._update_table(result=result)

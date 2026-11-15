@@ -6,6 +6,7 @@ A Python Discord bot for no-limit Texas Hold'em with persistent chip wallets, da
 
 ## Features
 
+- **`/profile`** — your avatar, username, wallet, daily availability/cooldown, and poker progress: games played, hands played, hands won, hand win rate, biggest pot won, and net chips.
 - **`/daily`** — claim **1,000** chips once per UTC day.
 - **`/creategame [buy_in]`** — opens a table in the channel and joins the host automatically. The buy-in (default **500**) becomes the host's starting stack.
 - **`join game`** — typed in the channel, or use the **Join game** button. Does nothing if no table exists.
@@ -71,6 +72,7 @@ Requires **Python 3.11+** and a **PostgreSQL** database.
 | Command | Who | What it does |
 | --- | --- | --- |
 | `/daily` | everyone | Claims 1,000 chips once per UTC day and shows your balance. |
+| `/profile` | everyone | Shows your avatar, username, wallet, daily status or cooldown, and poker stats (games, hands, hand wins/rate, biggest pot, net chips). |
 | `/help` | everyone | Rules, command list, and a generated hand-ranking chart. |
 | `/creategame [buy_in]` | everyone | Opens a table. Buy-in range is 100–100,000; default 500. One table per channel. |
 | `join game` (typed) | everyone | Joins the lobby. Requires enough chips; the buy-in is deducted. |
@@ -120,7 +122,7 @@ pokerbot/
   engine.py     poker rules wrapper, seating/blinds rotation, CSPRNG-shuffled deck
   ui.py         lobby/action buttons and raise modal
   visuals.py    Pillow table, hole-card, and hand-ranking renders
-  store.py      PostgreSQL chip wallet (DATABASE_URL)
+  store.py      PostgreSQL chip wallet and lifetime poker stats (DATABASE_URL)
 assets/cards/   MIT-licensed playing card PNGs + LICENSE
 tests/          engine, wallet, and headless game-loop tests
 ```
