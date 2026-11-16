@@ -195,6 +195,29 @@ class GameFlowTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(total, 2000)
 
+    async def test_create_game_refuses_a_buy_in_above_the_wallet(self) -> None:
+        self.assertEqual(await self.store.balance(self.host.id), 1000)
+
+        game, error = await PokerGame.create(
+            self.bot, self.channel, self.host, 1001
+        )
+
+        self.assertIsNone(game)
+        self.assertIn("You need **1,001** chips", error)
+        self.assertEqual(await self.store.balance(self.host.id), 1000)
+        self.assertNotIn(self.channel.id, self.bot.games)
+
+    async def test_create_game_rejects_out_of_range_buy_ins(self) -> None:
+        for buy_in in (0, -1, 99, 100_001):
+            with self.subTest(buy_in=buy_in):
+                game, error = await PokerGame.create(
+                    self.bot, self.channel, self.host, buy_in
+                )
+                self.assertIsNone(game)
+                self.assertIn("Buy-in must be between", error)
+        self.assertEqual(await self.store.balance(self.host.id), 1000)
+        self.assertNotIn(self.channel.id, self.bot.games)
+
 
     async def test_timeout_that_cannot_fold_does_not_stall_the_hand(self) -> None:
         # A player who has nothing to call cannot fold in PokerKit. The bot

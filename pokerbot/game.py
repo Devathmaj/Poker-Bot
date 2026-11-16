@@ -14,8 +14,10 @@ import discord
 from pokerkit.hands import StandardHighHand
 
 from .config import (
+    MAX_BUY_IN,
     MAX_PLAYERS,
     MAX_TIMEOUTS,
+    MIN_BUY_IN,
     MIN_PLAYERS,
     SHOWDOWN_PAUSE,
     STREET_PAUSE,
@@ -151,6 +153,12 @@ class PokerGame:
     ) -> tuple[PokerGame | None, str | None]:
         if channel.id in bot.games:
             return None, "There is already a poker table in this channel."
+
+        if not MIN_BUY_IN <= buy_in <= MAX_BUY_IN:
+            return None, (
+                f"Buy-in must be between **{MIN_BUY_IN:,}** and "
+                f"**{MAX_BUY_IN:,}** chips."
+            )
 
         new_balance = await bot.store.debit(host.id, buy_in)
         if new_balance is None:
