@@ -10,6 +10,13 @@ from unittest.mock import patch
 from pokerbot.game import PokerGame, ordinal
 from pokerbot.ui import ActionView
 
+# Pillow rendering is the slow part of a hand and irrelevant to these checks.
+TINY_PNG = (
+    b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
+    b"\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\nIDATx\x9cc\x00\x01"
+    b"\x00\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82"
+)
+
 
 class FakeUser:
     _ids = itertools.count(1000)
@@ -59,6 +66,20 @@ def has_cards_button(message: FakeMessage) -> bool:
     )
 
 
+def latest_embed(message: FakeMessage):
+    for edit in reversed(message.edits):
+        if "embed" in edit:
+            return edit["embed"]
+    return message.kwargs.get("embed")
+
+
+def embed_field(embed, name: str):
+    for field in embed.fields:
+        if field.name == name:
+            return field
+    return None
+
+
 class MemoryStore:
     """Small in-memory stand-in for the Postgres wallet."""
 
@@ -102,6 +123,12 @@ class FakeBot:
 class GameFlowTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         asyncio.get_running_loop().set_debug(False)
+        self.enterContext(
+            patch("pokerbot.game.render_table", return_value=TINY_PNG)
+        )
+        self.enterContext(
+            patch("pokerbot.game.render_help_chart", return_value=TINY_PNG)
+        )
         self.store = MemoryStore()
         self.bot = FakeBot(self.store)
         self.channel = FakeChannel()
@@ -225,6 +252,62 @@ class GameFlowTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(table.edits), edits_before + 1)
             self.assertIs(game.table_message, table)
             self.assertFalse(table.deleted)
+            await game.end("test over")
+
+    async def test_table_embed_shows_this_hands_actions(self) -> None:
+        with patch("pokerbot.game.SHOWDOWN_PAUSE", 0.01), patch(
+            "pokerbot.game.STREET_PAUSE", 0.01
+        ):
+            game = await self._new_table()
+            users = {self.host.id: self.host, self.guest.id: self.guest}
+            actor = await self._next_actor(game)
+            actor_name = users[actor].display_name
+
+            ok, message = await game.submit_action(users[actor], "call")
+            self.assertTrue(ok, message)
+
+            # The log line is added as soon as the action resolves; the table
+            # embed picks it up on the next render.
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + 5
+            field = None
+            while loop.time() < deadline:
+                table = game.table_message
+                if table is not None:
+                    embed = latest_embed(table)
+                    field = embed_field(embed, "📋 This hand")
+                    if field is not None and actor_name in field.value:
+                        break
+                await asyncio.sleep(0.01)
+
+            self.assertIsNotNone(field)
+            self.assertIn(actor_name, field.value)
+            self.assertIn("Pre-flop", field.value)
+            self.assertTrue(
+                "calls" in field.value or "checks" in field.value,
+                field.value,
+            )
+
+            embed = latest_embed(game.table_message)
+            self.assertIn("Hand #1", embed.title)
+            self.assertIn("Pot", embed.description)
+            await game.end("test over")
+
+    async def test_action_log_keeps_the_newest_lines_within_limits(self) -> None:
+        with patch("pokerbot.game.SHOWDOWN_PAUSE", 0.01), patch(
+            "pokerbot.game.STREET_PAUSE", 0.01
+        ):
+            game = await self._new_table()
+            for index in range(200):
+                game._log_action(
+                    "Pre-flop", f"Player{index}", f"raises to {index:,}"
+                )
+
+            text = game._log_text()
+
+            self.assertLessEqual(len(text), 1024)
+            self.assertTrue(text.startswith("…"))
+            self.assertTrue(text.endswith("raises to 199"))
             await game.end("test over")
 
     async def test_check_call_hand_completes_and_chips_cash_out(self) -> None:
@@ -361,17 +444,10 @@ class GameFlowTests(unittest.IsolatedAsyncioTestCase):
         # A player who has nothing to call cannot fold in PokerKit. The bot
         # must auto-check instead, or the same player is prompted (and
         # eventually removed) over and over while the hand never advances.
-        png = (
-            b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
-            b"\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\nIDATx\x9cc\x00\x01"
-            b"\x00\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82"
-        )
         with patch("pokerbot.game.TURN_SECONDS", 0.2), patch(
             "pokerbot.game.MAX_TIMEOUTS", 0
         ), patch("pokerbot.game.SHOWDOWN_PAUSE", 0.01), patch(
             "pokerbot.game.STREET_PAUSE", 0.01
-        ), patch("pokerbot.game.render_table", return_value=png), patch(
-            "pokerbot.game.render_help_chart", return_value=png
         ):
             game = await self._new_table()
             users = {self.host.id: self.host, self.guest.id: self.guest}

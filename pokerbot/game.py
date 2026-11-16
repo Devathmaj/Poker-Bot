@@ -27,6 +27,7 @@ from .config import (
     blinds_for_buy_in,
 )
 from .engine import Hand, HandResult, IllegalAction, Player, Table
+from .hands import format_cards
 from .store import HandStat
 from .ui import ActionView, LobbyView
 from .visuals import (
@@ -155,6 +156,9 @@ class PokerGame:
         self._settling = False
         self._settle_lock = asyncio.Lock()
         self._anchored_at = float("-inf")
+        # Every action of the hand in progress, oldest first. Shown in the
+        # table embed and reset when the next hand is dealt.
+        self._action_log: list[str] = []
 
     # ------------------------------------------------------------------ setup
     @classmethod
@@ -402,6 +406,7 @@ class PokerGame:
 
     async def _begin_hand(self) -> None:
         self.pending = None
+        self._action_log.clear()
         # The finished hand's table keeps its result in the channel, but its
         # buttons belong to a hand that no longer exists.
         if self.table_message is not None:
@@ -431,12 +436,17 @@ class PokerGame:
             if actor.kicked:
                 # A removed player should never hold the turn, but if they do,
                 # keep the hand moving rather than waiting on them forever.
-                if not self._auto_act(hand, actor_id):
+                street = hand.street
+                description = self._auto_act(hand, actor_id)
+                if description is None:
                     logger.warning(
                         "Hand %s could not be advanced past a removed player",
                         self.table.hand_number,
                     )
                     return
+                self._log_action(
+                    street, actor.name, f"{description} (removed)"
+                )
                 continue
             await self._prompt_turn(actor_id)
 
@@ -469,14 +479,16 @@ class PokerGame:
             if self.pending is pending:
                 self.pending = None
 
+        street = hand.street
         try:
-            hand.act(actor_id, action, amount)
+            description = hand.act(actor_id, action, amount)
         except IllegalAction as exc:
             await self.channel.send(
                 f"⚠️ **{player.name}**: {exc}",
                 allowed_mentions=discord.AllowedMentions.none(),
             )
             return
+        self._log_action(street, player.name, description)
 
         if not hand.is_over:
             await asyncio.sleep(0.35)
@@ -488,17 +500,16 @@ class PokerGame:
         player who can check for free (there is nothing to fold to). In that
         case the player auto-checks instead, otherwise the hand would never
         advance and the turn would be handed back to the same player forever.
-        Returns the action applied, or ``None`` if the hand did not move on.
+        Returns the action applied as a short phrase (``"folds"``,
+        ``"checks"``, ...), or ``None`` if the hand did not move on.
         """
         if hand.is_over or hand.actor_id != user_id:
             return None
         try:
             if hand.state.can_fold():
-                hand.act(user_id, "fold")
-                return "fold"
+                return hand.act(user_id, "fold")
             if hand.state.can_check_or_call():
-                hand.act(user_id, "check")
-                return "check"
+                return hand.act(user_id, "check")
         except IllegalAction:
             logger.exception("Could not auto-act for %s", user_id)
         return None
@@ -508,10 +519,13 @@ class PokerGame:
         if hand is None or player.kicked:
             return
 
+        street = hand.street
         player.timeouts += 1
         removed = player.timeouts > MAX_TIMEOUTS
         forfeited = self.table.forfeit(player.user_id) if removed else 0
         action = self._auto_act(hand, player.user_id)
+        if action is not None:
+            self._log_action(street, player.name, f"{action} (timed out)")
 
         if removed:
             embed = discord.Embed(
@@ -527,7 +541,7 @@ class PokerGame:
             )
             await self.channel.send(embed=embed)
         else:
-            done = "auto-checked" if action == "check" else "auto-folded"
+            done = "auto-checked" if action == "checks" else "auto-folded"
             await self.channel.send(
                 f"⏰ <@{player.user_id}> timed out "
                 f"({player.timeouts}/{MAX_TIMEOUTS}) — {done}."
@@ -694,6 +708,22 @@ class PokerGame:
             buy_in=self.buy_in,
         )
 
+    def _log_action(self, street: str, name: str, description: str) -> None:
+        """Append one line to the hand's running action history."""
+        self._action_log.append(f"{street} · **{name}** {description}")
+
+    def _log_text(self, limit: int = 1024) -> str:
+        """Fit the newest history lines into one embed field (1024 max)."""
+        lines = self._action_log[-80:]
+        while lines:
+            omitted = len(self._action_log) - len(lines)
+            prefix = f"… {omitted:,} earlier actions\n" if omitted else ""
+            text = prefix + "\n".join(lines)
+            if len(text) <= limit:
+                return text
+            lines.pop(0)
+        return "—"
+
     def _table_embed(
         self,
         actor_id: int | None = None,
@@ -705,18 +735,67 @@ class PokerGame:
         hand_label = f"Hand #{self.table.hand_number}"
         if self.hands_limit is not None:
             hand_label += f"/{self.hands_limit:,}"
+
+        showdown = result is not None and len(result.revealed) >= 2
+        if showdown:
+            shown_street = "Showdown"
+        elif result is not None:
+            shown_street = "Hand over"
+        else:
+            shown_street = hand.street
+
         embed = discord.Embed(
-            title=f"♠ Texas Hold'em · {hand_label}",
+            title=f"♠ Texas Hold'em · {hand_label} · {shown_street}",
             color=GOLD if result is not None else EMBED_COLOR,
         )
 
-        if result is not None:
-            showdown = len(result.revealed) >= 2
-            shown_street = "Showdown" if showdown else hand.street
-            embed.description = (
-                f"**{shown_street}** · pot **"
-                f"{result.pot + result.dead_money:,}** chips"
+        pot = (
+            result.pot + result.dead_money
+            if result is not None
+            else hand.pot + self.table.bonus_pot
+        )
+        description = [
+            (
+                f"💰 Pot **{pot:,}** · blinds "
+                f"**{self.small_blind:,}/{self.big_blind:,}**"
             )
+        ]
+        if hand.board:
+            description.append(f"🃏 Board: {format_cards(tuple(hand.board))}")
+
+        if result is None and actor_id is not None and deadline is not None:
+            description.append(
+                f"🎯 <@{actor_id}> is up · ⏳ <t:{int(deadline)}:R>"
+            )
+            try:
+                legal = hand.legal_actions()
+            except IllegalAction:
+                legal = None
+            if legal is not None:
+                action_bits = [
+                    (
+                        f"to call **{legal.call_amount:,}**"
+                        if legal.call_amount
+                        else "no bet to call"
+                    )
+                ]
+                if (
+                    legal.can_raise
+                    and legal.min_raise_to is not None
+                    and legal.max_raise_to is not None
+                ):
+                    action_bits.append(
+                        f"raise **{legal.min_raise_to:,}–"
+                        f"{legal.max_raise_to:,}**"
+                    )
+                description.append(" · ".join(action_bits))
+            description.append(
+                "Type `check`, `call`, `raise <amount>`, `all in`, or "
+                "`fold` — or press a button below."
+            )
+        embed.description = "\n".join(description)
+
+        if result is not None:
             if result.winners:
                 lines = []
                 for user_id, amount in result.winners:
@@ -741,25 +820,19 @@ class PokerGame:
                     ),
                     inline=False,
                 )
-        else:
-            if actor_id is not None and deadline is not None:
-                embed.description = (
-                    f"**{hand.street}** · pot **{hand.pot + self.table.bonus_pot:,}**\n"
-                    f"<@{actor_id}> is up · <t:{int(deadline)}:R>\n"
-                    "Type `check`, `call`, `raise <amount>`, `all in`, "
-                    "or `fold` — or press a button below."
-                )
-            else:
-                embed.description = (
-                    f"**{hand.street}** · pot **{hand.pot + self.table.bonus_pot:,}**"
-                )
+
+        if self._action_log:
+            embed.add_field(
+                name="📋 This hand",
+                value=self._log_text(),
+                inline=False,
+            )
 
         embed.set_image(url="attachment://table.png")
         embed.set_footer(
             text=(
-                f"Buy-in {self.buy_in:,} · blinds "
-                f"{self.small_blind:,}/{self.big_blind:,} · "
-                f"{TURN_SECONDS}s per turn · {MAX_TIMEOUTS} timeouts allowed"
+                f"Buy-in {self.buy_in:,} · {TURN_SECONDS}s per turn · "
+                f"{MAX_TIMEOUTS} timeouts allowed"
             )
         )
         return embed
@@ -822,7 +895,10 @@ class PokerGame:
 
         if self.table_message is None:
             self.table_message = await self.channel.send(
-                embed=embed, file=file, view=view
+                embed=embed,
+                file=file,
+                view=view,
+                allowed_mentions=discord.AllowedMentions.none(),
             )
             return
 
@@ -832,7 +908,10 @@ class PokerGame:
             )
         except discord.NotFound:
             self.table_message = await self.channel.send(
-                embed=embed, file=file, view=view
+                embed=embed,
+                file=file,
+                view=view,
+                allowed_mentions=discord.AllowedMentions.none(),
             )
         except discord.HTTPException:
             logger.exception("Could not update table message")
