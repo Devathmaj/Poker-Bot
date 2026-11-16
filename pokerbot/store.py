@@ -6,12 +6,17 @@ import asyncio
 import logging
 from contextlib import suppress
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, time, timedelta
+from datetime import UTC, datetime, timedelta
 
 import psycopg
 from psycopg.rows import dict_row
 
 logger = logging.getLogger(__name__)
+
+# Every claim starts the player's cooldown over. Using a rolling window keyed
+# to each user's own timestamp (instead of a UTC day boundary) means nobody
+# can claim twice in a short span around midnight.
+DAILY_COOLDOWN = timedelta(hours=24)
 
 # Errors that mean "the socket is gone", not "the query is wrong". A pooled
 # Postgres endpoint (Supabase, PgBouncer, ...) closes idle sessions, and the
@@ -24,8 +29,27 @@ _SCHEMAS = (
     CREATE TABLE IF NOT EXISTS users (
         user_id BIGINT PRIMARY KEY,
         chips BIGINT NOT NULL DEFAULT 0,
-        last_daily DATE
+        last_daily TIMESTAMPTZ
     )
+    """,
+    # ``last_daily`` used to be a UTC date. The daily reward is now a rolling
+    # 24-hour cooldown measured from the last claim, so existing rows are
+    # converted from the start of that UTC day.
+    """
+    DO $$
+    BEGIN
+        IF EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_schema = current_schema()
+              AND table_name = 'users'
+              AND column_name = 'last_daily'
+              AND data_type = 'date'
+        ) THEN
+            ALTER TABLE users
+                ALTER COLUMN last_daily TYPE TIMESTAMPTZ
+                USING last_daily::timestamp AT TIME ZONE 'UTC';
+        END IF;
+    END $$
     """,
     # Identity lives on the same row as the wallet. Databases created before
     # these columns existed get them added in place.
@@ -245,11 +269,8 @@ class ChipStore:
         return await self._call(self._credit, user_id, amount)
 
     def _claim_daily(
-        self, user_id: int, amount: int, today: date
+        self, user_id: int, amount: int, now: datetime
     ) -> DailyClaim:
-        next_claim = datetime.combine(
-            today + timedelta(days=1), time.min, tzinfo=UTC
-        )
         with self._connection.transaction():
             self._connection.execute(
                 "INSERT INTO users (user_id, chips) VALUES (%s, 0) "
@@ -260,22 +281,26 @@ class ChipStore:
                 "SELECT chips, last_daily FROM users WHERE user_id = %s FOR UPDATE",
                 (user_id,),
             ).fetchone()
-            if row is not None and row["last_daily"] == today:
-                return DailyClaim(False, int(row["chips"]), next_claim)
+            assert row is not None
+            chips = int(row["chips"])
+            last_daily = row["last_daily"]
+            if last_daily is not None:
+                ready_at = last_daily + DAILY_COOLDOWN
+                if now < ready_at:
+                    return DailyClaim(False, chips, ready_at)
 
             self._connection.execute(
                 "UPDATE users SET chips = chips + %s, last_daily = %s "
                 "WHERE user_id = %s",
-                (amount, today, user_id),
+                (amount, now, user_id),
             )
-            new_balance = int(row["chips"]) + amount if row else amount
-        return DailyClaim(True, new_balance, next_claim)
+        return DailyClaim(True, chips + amount, now + DAILY_COOLDOWN)
 
     async def claim_daily(
-        self, user_id: int, amount: int, today: date | None = None
+        self, user_id: int, amount: int, now: datetime | None = None
     ) -> DailyClaim:
-        today = today or datetime.now(UTC).date()
-        return await self._call(self._claim_daily, user_id, amount, today)
+        now = now or datetime.now(UTC)
+        return await self._call(self._claim_daily, user_id, amount, now)
 
     # ------------------------------------------------------------------ stats
     def _record_games_started(self, user_ids: list[int]) -> None:
@@ -327,7 +352,7 @@ class ChipStore:
         await self._call(self._record_hand_stats, stats)
 
     # ---------------------------------------------------------------- profile
-    def _profile(self, user_id: int, today: date) -> ProfileData:
+    def _profile(self, user_id: int, now: datetime) -> ProfileData:
         row = self._connection.execute(
             "SELECT u.chips, u.last_daily, "
             "COALESCE(s.games_played, 0) AS games_played, "
@@ -339,14 +364,18 @@ class ChipStore:
             "ON s.user_id = u.user_id WHERE u.user_id = %s",
             (user_id,),
         ).fetchone()
-        next_claim = datetime.combine(
-            today + timedelta(days=1), time.min, tzinfo=UTC
-        )
         if row is None:
-            return ProfileData(0, True, next_claim, 0, 0, 0, 0, 0)
+            return ProfileData(0, True, now, 0, 0, 0, 0, 0)
+        last_daily = row["last_daily"]
+        if last_daily is None:
+            can_claim = True
+            next_claim = now
+        else:
+            next_claim = last_daily + DAILY_COOLDOWN
+            can_claim = now >= next_claim
         return ProfileData(
             balance=int(row["chips"]),
-            can_claim_daily=row["last_daily"] != today,
+            can_claim_daily=can_claim,
             next_claim=next_claim,
             games_played=int(row["games_played"]),
             hands_played=int(row["hands_played"]),
@@ -356,10 +385,10 @@ class ChipStore:
         )
 
     async def profile(
-        self, user_id: int, today: date | None = None
+        self, user_id: int, now: datetime | None = None
     ) -> ProfileData:
-        today = today or datetime.now(UTC).date()
-        return await self._call(self._profile, user_id, today)
+        now = now or datetime.now(UTC)
+        return await self._call(self._profile, user_id, now)
 
     # ---------------------------------------------------------------- audience
     def _remember_user(

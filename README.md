@@ -7,7 +7,7 @@ A Python Discord bot for no-limit Texas Hold'em with persistent chip wallets, da
 ## Features
 
 - **`/profile [user]`** — view your own or another player's avatar, username, wallet, daily availability/cooldown, and poker progress: games played, hands played, hands won, hand win rate, biggest pot won, and net chips.
-- **`/daily`** — claim **1,000** chips once per UTC day.
+- **`/daily`** — claim **1,000** chips every 24 hours.
 - **`/creategame [buy_in]`** — opens a table in the channel and joins the host automatically. The buy-in (default **500**) becomes the host's starting stack.
 - **`join game`** — typed in the channel, or use the **Join game** button. Does nothing if no table exists.
 - **`start game`** — the host starts the game by typing this or pressing **Start game**.
@@ -71,7 +71,7 @@ Requires **Python 3.11+** and a **PostgreSQL** database.
 
 | Command | Who | What it does |
 | --- | --- | --- |
-| `/daily` | everyone | Claims 1,000 chips once per UTC day and shows your balance. |
+| `/daily` | everyone | Claims 1,000 chips every 24 hours and shows your balance. |
 | `/profile [user]` | everyone | Shows your profile, or another member's, including avatar, username, wallet, daily status/cooldown, and poker stats (games, hands, hand wins/rate, biggest pot, net chips). Public message. |
 | `/help` | everyone | Rules, command list, and a generated hand-ranking chart. |
 | `/creategame [buy_in]` | everyone | Opens a table. Buy-in range is 100–100,000; default 500. One table per channel. |
@@ -125,6 +125,9 @@ created automatically on startup.
 
 - A player's name is stored on their wallet row in `users` the first time they
   use a command or act in a hand, and refreshed at most once an hour.
+- `/daily` uses a rolling 24-hour cooldown stored in `users.last_daily`: each
+  successful claim sets the timer back to 24 hours, so the reset time follows
+  the player instead of a fixed UTC day boundary.
 - A server is recorded when the bot joins it. The list is reconciled on every
   reconnect, so servers the bot was kicked from while it was offline are still
   marked. `added_at` is the start of the current tenure and `removed_at` is

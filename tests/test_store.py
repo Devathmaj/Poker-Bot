@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import unittest
 import uuid
-from datetime import date
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from urllib.parse import quote
 
@@ -57,30 +57,59 @@ class StoreTests(unittest.IsolatedAsyncioTestCase):
         ) as connection:
             return connection.execute(sql, params).fetchall()
 
-    async def test_daily_claim_is_once_per_day(self) -> None:
-        first = await self.store.claim_daily(1, 1000, date(2026, 11, 16))
+    async def test_daily_claim_is_once_per_24_hours(self) -> None:
+        claimed_at = datetime(2026, 11, 16, 14, 30, tzinfo=UTC)
+        first = await self.store.claim_daily(1, 1000, claimed_at)
         self.assertTrue(first.claimed)
         self.assertEqual(first.balance, 1000)
+        self.assertEqual(first.next_claim, claimed_at + timedelta(hours=24))
 
-        second = await self.store.claim_daily(1, 1000, date(2026, 11, 16))
+        # A few minutes later the cooldown is still running.
+        second = await self.store.claim_daily(
+            1, 1000, claimed_at + timedelta(minutes=5)
+        )
         self.assertFalse(second.claimed)
         self.assertEqual(second.balance, 1000)
+        self.assertEqual(second.next_claim, claimed_at + timedelta(hours=24))
 
-        tomorrow = await self.store.claim_daily(1, 1000, date(2026, 11, 17))
-        self.assertTrue(tomorrow.claimed)
-        self.assertEqual(tomorrow.balance, 2000)
+        # One second before the cooldown ends it is still blocked.
+        almost = await self.store.claim_daily(
+            1, 1000, claimed_at + timedelta(hours=24, seconds=-1)
+        )
+        self.assertFalse(almost.claimed)
+
+        # Once 24 hours have passed, the claim works again, and the timer
+        # restarts from that new claim rather than a fixed UTC boundary.
+        later = claimed_at + timedelta(hours=24, minutes=37)
+        third = await self.store.claim_daily(1, 1000, later)
+        self.assertTrue(third.claimed)
+        self.assertEqual(third.balance, 2000)
+        self.assertEqual(third.next_claim, later + timedelta(hours=24))
+
+        blocked = await self.store.claim_daily(
+            1, 1000, later + timedelta(hours=23)
+        )
+        self.assertFalse(blocked.claimed)
+        self.assertEqual(blocked.next_claim, later + timedelta(hours=24))
 
     async def test_profile_tracks_daily_and_poker_progress(self) -> None:
-        today = date(2026, 11, 16)
-        profile = await self.store.profile(1, today)
+        claimed_at = datetime(2026, 11, 16, 14, 30, tzinfo=UTC)
+        profile = await self.store.profile(1, claimed_at)
         self.assertTrue(profile.can_claim_daily)
         self.assertEqual(profile.hands_played, 0)
 
-        await self.store.claim_daily(1, 1000, today)
-        profile = await self.store.profile(1, today)
+        await self.store.claim_daily(1, 1000, claimed_at)
+        profile = await self.store.profile(1, claimed_at + timedelta(hours=1))
         self.assertFalse(profile.can_claim_daily)
         self.assertEqual(profile.balance, 1000)
-        self.assertEqual(profile.next_claim.date(), date(2026, 11, 17))
+        self.assertEqual(
+            profile.next_claim, claimed_at + timedelta(hours=24)
+        )
+
+        profile = await self.store.profile(
+            1, claimed_at + timedelta(hours=24)
+        )
+        self.assertTrue(profile.can_claim_daily)
 
         await self.store.record_games_started([1, 2])
         await self.store.record_hand_stats(
@@ -96,7 +125,7 @@ class StoreTests(unittest.IsolatedAsyncioTestCase):
             ]
         )
 
-        profile = await self.store.profile(1, today)
+        profile = await self.store.profile(1, claimed_at)
         self.assertEqual(profile.games_played, 1)
         self.assertEqual(profile.hands_played, 2)
         self.assertEqual(profile.hands_won, 1)

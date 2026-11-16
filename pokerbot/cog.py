@@ -53,7 +53,7 @@ class PokerCog(commands.Cog):
     # ---------------------------------------------------------------- economy
     @app_commands.command(
         name="daily",
-        description=f"Claim {DAILY_CHIPS:,} chips once per UTC day.",
+        description=f"Claim {DAILY_CHIPS:,} chips every 24 hours.",
     )
     async def daily(self, interaction: discord.Interaction) -> None:
         # Acknowledge before touching the database. Discord only gives an
@@ -82,7 +82,7 @@ class PokerCog(commands.Cog):
             embed = discord.Embed(
                 title="Daily already claimed",
                 description=(
-                    f"You already collected today's chips.\n"
+                    f"You already collected your daily chips.\n"
                     f"Next claim: <t:{int(claim.next_claim.timestamp())}:R>"
                 ),
                 color=EMBED_COLOR,
@@ -190,7 +190,7 @@ class PokerCog(commands.Cog):
         embed.add_field(
             name="Chips",
             value=(
-                f"Use `/daily` once per UTC day for **{DAILY_CHIPS:,}** chips. "
+                f"Use `/daily` every 24 hours for **{DAILY_CHIPS:,}** chips. "
                 f"`/creategame [buy_in]` opens a table and takes the buy-in "
                 f"(default {DEFAULT_BUY_IN:,}). Buy-in chips become your stack; "
                 "at the end of the game your remaining stack is paid back to "
