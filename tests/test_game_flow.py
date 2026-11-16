@@ -7,7 +7,7 @@ import itertools
 import unittest
 from unittest.mock import patch
 
-from pokerbot.game import PokerGame
+from pokerbot.game import PokerGame, ordinal
 from pokerbot.ui import CardsView
 
 
@@ -194,6 +194,89 @@ class GameFlowTests(unittest.IsolatedAsyncioTestCase):
             self.guest.id
         )
         self.assertEqual(total, 2000)
+
+
+    async def test_timeout_that_cannot_fold_does_not_stall_the_hand(self) -> None:
+        # A player who has nothing to call cannot fold in PokerKit. The bot
+        # must auto-check instead, or the same player is prompted (and
+        # eventually removed) over and over while the hand never advances.
+        png = (
+            b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
+            b"\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\nIDATx\x9cc\x00\x01"
+            b"\x00\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82"
+        )
+        with patch("pokerbot.game.TURN_SECONDS", 0.2), patch(
+            "pokerbot.game.MAX_TIMEOUTS", 0
+        ), patch("pokerbot.game.SHOWDOWN_PAUSE", 0.01), patch(
+            "pokerbot.game.STREET_PAUSE", 0.01
+        ), patch("pokerbot.game.render_table", return_value=png), patch(
+            "pokerbot.game.render_help_chart", return_value=png
+        ):
+            game = await self._new_table()
+            users = {self.host.id: self.host, self.guest.id: self.guest}
+
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + 10
+            while loop.time() < deadline and game.state != "ended":
+                pending = game.pending
+                # Hand 1: both players act normally. On hand 2 the guest
+                # (small blind) limps, which leaves the host (big blind)
+                # with a free check — the timeout there must auto-check.
+                if (
+                    pending is not None
+                    and not pending.future.done()
+                    and (
+                        game.table.hand_number == 1
+                        or pending.user_id == self.guest.id
+                    )
+                ):
+                    await game.submit_action(users[pending.user_id], "call")
+                await asyncio.sleep(0.01)
+
+            removed = [
+                message
+                for message in self.channel.messages
+                if message.kwargs.get("embed") is not None
+                and "Player removed"
+                in str(getattr(message.kwargs["embed"], "title", ""))
+            ]
+            self.assertEqual(len(removed), 1)
+            self.assertEqual(game.state, "ended")
+
+            # The table must close normally after the hand finishes, not
+            # because the stuck hand crashed the game loop.
+            closed = [
+                message.kwargs["embed"].description
+                for message in self.channel.messages
+                if message.kwargs.get("embed") is not None
+                and getattr(message.kwargs["embed"], "title", "")
+                == "♠ Table closed"
+            ]
+            self.assertTrue(closed)
+            self.assertNotIn("internal error", closed[-1])
+
+        total = await self.store.balance(self.host.id) + await self.store.balance(
+            self.guest.id
+        )
+        self.assertEqual(total, 2000)
+
+    def test_ordinal_suffixes(self) -> None:
+        expected = {
+            1: "1st",
+            2: "2nd",
+            3: "3rd",
+            4: "4th",
+            11: "11th",
+            12: "12th",
+            13: "13th",
+            21: "21st",
+            22: "22nd",
+            23: "23rd",
+            111: "111th",
+        }
+        for number, word in expected.items():
+            with self.subTest(number=number):
+                self.assertEqual(ordinal(number), word)
 
 
 if __name__ == "__main__":

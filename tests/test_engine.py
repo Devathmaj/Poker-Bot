@@ -155,6 +155,40 @@ class TimeoutTests(unittest.TestCase):
         self.assertEqual(sum(refunds.values()), 3000)
         self.assertEqual(table.bonus_pot, 0)
 
+    def test_forfeit_is_idempotent(self):
+        players = [Player(1, "A", 1000), Player(2, "B", 1000)]
+        table = Table(players, 5, 10, rng=random.Random(13))
+        table.start_hand()
+
+        self.assertEqual(table.forfeit(1), 995)
+        self.assertEqual(table.forfeit(1), 0)
+        self.assertEqual(table.bonus_pot, 995)
+
+    def test_removed_player_who_cannot_fold_still_conserves_chips(self):
+        # PokerKit refuses to fold a player with nothing to call, so a timeout
+        # leaves them in the hand. If they win the pot anyway, their winnings
+        # must go to the players still at the table instead of disappearing.
+        for seed in range(30):
+            with self.subTest(seed=seed):
+                players = [
+                    Player(1, "A", 1000),
+                    Player(2, "B", 1000),
+                ]
+                table = Table(players, 5, 10, rng=random.Random(seed))
+                hand = table.start_hand()
+
+                # Small blind limps, leaving the big blind with a free check.
+                self.assertEqual(hand.act(1, "call"), "calls 5")
+                self.assertEqual(hand.actor_id, 2)
+                self.assertFalse(hand.state.can_fold())
+                self.assertEqual(table.forfeit(2), 990)
+
+                check_call_round(hand)
+                table.finish_hand()
+
+                self.assertEqual(sum(p.chips for p in players), 2000)
+                self.assertEqual(table.bonus_pot, 0)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -75,6 +75,15 @@ RANK_PLURAL = {
 RANK_ORDER = "23456789TJQKA"
 
 
+def ordinal(number: int) -> str:
+    """Return ``1st``, ``2nd``, ``3rd``, ``4th``, ... ``21st``."""
+    if 10 <= number % 100 <= 20:
+        suffix = "th"
+    else:
+        suffix = {1: "st", 2: "nd", 3: "rd"}.get(number % 10, "th")
+    return f"{number}{suffix}"
+
+
 def describe_hole_cards(cards: list[str]) -> str:
     if len(cards) < 2:
         return "No cards"
@@ -359,12 +368,30 @@ class PokerGame:
             if actor_id is None:
                 logger.warning("Hand %s stalled with no actor", self.table.hand_number)
                 return
+            actor = self.table.player(actor_id)
+            if actor is None:
+                logger.warning(
+                    "Hand %s has an unknown actor (%s)",
+                    self.table.hand_number,
+                    actor_id,
+                )
+                return
+            if actor.kicked:
+                # A removed player should never hold the turn, but if they do,
+                # keep the hand moving rather than waiting on them forever.
+                if not self._auto_act(hand, actor_id):
+                    logger.warning(
+                        "Hand %s could not be advanced past a removed player",
+                        self.table.hand_number,
+                    )
+                    return
+                continue
             await self._prompt_turn(actor_id)
 
     async def _prompt_turn(self, actor_id: int) -> None:
         hand = self.table.hand
         player = self.table.player(actor_id)
-        if hand is None or player is None:
+        if hand is None or player is None or player.kicked:
             return
 
         future = asyncio.get_running_loop().create_future()
@@ -400,21 +427,45 @@ class PokerGame:
         if not hand.is_over:
             await asyncio.sleep(0.35)
 
+    def _auto_act(self, hand: Hand, user_id: int) -> str | None:
+        """Resolve a player's turn on their behalf.
+
+        Folding is the normal timeout action, but PokerKit refuses to fold a
+        player who can check for free (there is nothing to fold to). In that
+        case the player auto-checks instead, otherwise the hand would never
+        advance and the turn would be handed back to the same player forever.
+        Returns the action applied, or ``None`` if the hand did not move on.
+        """
+        if hand.is_over or hand.actor_id != user_id:
+            return None
+        try:
+            if hand.state.can_fold():
+                hand.act(user_id, "fold")
+                return "fold"
+            if hand.state.can_check_or_call():
+                hand.act(user_id, "check")
+                return "check"
+        except IllegalAction:
+            logger.exception("Could not auto-act for %s", user_id)
+        return None
+
     async def _handle_timeout(self, player: Player) -> None:
         hand = self.table.hand
-        if hand is None:
+        if hand is None or player.kicked:
             return
 
         player.timeouts += 1
-        if player.timeouts > MAX_TIMEOUTS:
-            forfeited = self.table.forfeit(player.user_id)
-            with suppress(IllegalAction):
-                hand.act(player.user_id, "fold")
+        removed = player.timeouts > MAX_TIMEOUTS
+        forfeited = self.table.forfeit(player.user_id) if removed else 0
+        action = self._auto_act(hand, player.user_id)
+
+        if removed:
             embed = discord.Embed(
                 title="🚫 Player removed",
                 description=(
                     f"<@{player.user_id}> timed out for the "
-                    f"**{player.timeouts}th** time (limit: {MAX_TIMEOUTS}).\n"
+                    f"**{ordinal(player.timeouts)}** time "
+                    f"(limit: {MAX_TIMEOUTS}).\n"
                     f"They were removed from the table and their remaining "
                     f"**{forfeited:,}** chips went into the pot."
                 ),
@@ -422,11 +473,10 @@ class PokerGame:
             )
             await self.channel.send(embed=embed)
         else:
-            with suppress(IllegalAction):
-                hand.act(player.user_id, "fold")
+            done = "auto-checked" if action == "check" else "auto-folded"
             await self.channel.send(
                 f"⏰ <@{player.user_id}> timed out "
-                f"({player.timeouts}/{MAX_TIMEOUTS}) — auto-folded."
+                f"({player.timeouts}/{MAX_TIMEOUTS}) — {done}."
             )
 
         if not hand.is_over:

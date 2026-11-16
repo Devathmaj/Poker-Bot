@@ -95,6 +95,9 @@ class Hand:
         self.start_stacks = {player.user_id: player.chips for player in order}
         self.complete = False
         self.folded_users: set[int] = set()
+        # Stacks captured when a player was removed from the table. Used so
+        # their pot winnings are not counted as dead money twice.
+        self.forfeited_stacks: dict[int, int] = {}
 
         self.state = NoLimitTexasHoldem.create_state(
             _AUTOMATIONS,
@@ -269,6 +272,32 @@ class Hand:
             )
             for i, player in enumerate(self.order)
         }
+
+        # A removed player can reach the end of a hand when their last timeout
+        # left them with nothing to fold to (PokerKit only allows checking).
+        # Anything they win on top of the stack already forfeited is dead
+        # money for the players who are still at the table.
+        winnings = sum(
+            max(
+                0,
+                self.state.stacks[i]
+                - self.forfeited_stacks.get(player.user_id, 0),
+            )
+            for i, player in enumerate(self.order)
+            if player.kicked
+        )
+        stays = [
+            player
+            for i, player in enumerate(self.order)
+            if not player.kicked and self.state.statuses[i]
+        ] or [player for player in self.order if not player.kicked]
+        if winnings and stays:
+            share, remainder = divmod(winnings, len(stays))
+            for i, player in enumerate(stays):
+                final_chips[player.user_id] += share + (
+                    remainder if i == 0 else 0
+                )
+
         net = {
             user_id: final_chips[user_id] - self.start_stacks[user_id]
             for user_id in final_chips
@@ -375,17 +404,33 @@ class Table:
         self.hand.complete = True
 
         # A removed player's remaining stack is dead money. It is paid to the
-        # winner(s) of the hand that was running when they were removed.
+        # winner(s) of the hand that was running when they were removed, or to
+        # the players still at the table if the only "winner" was removed.
         bonus_awards: dict[int, int] = {}
-        if self.bonus_pot and result.winners:
-            dead = self.bonus_pot
-            share, remainder = divmod(dead, len(result.winners))
-            result.winners = [
-                (user_id, amount + share + (remainder if i == 0 else 0))
-                for i, (user_id, amount) in enumerate(result.winners)
+        recipients = [user_id for user_id, _ in result.winners]
+        if not recipients:
+            recipients = [
+                user_id
+                for user_id, chips in result.final_chips.items()
+                if chips > 0
+                and (player := self.player(user_id)) is not None
+                and not player.kicked
             ]
-            for i, (user_id, amount) in enumerate(result.winners):
-                bonus_awards[user_id] = amount - result.net[user_id]
+        if self.bonus_pot and recipients:
+            dead = self.bonus_pot
+            share, remainder = divmod(dead, len(recipients))
+            bonus_awards = {
+                user_id: share + (remainder if i == 0 else 0)
+                for i, user_id in enumerate(recipients)
+            }
+            merged: dict[int, int] = {}
+            for user_id, amount in result.winners:
+                merged[user_id] = merged.get(user_id, 0) + amount
+            for user_id, amount in bonus_awards.items():
+                merged[user_id] = merged.get(user_id, 0) + amount
+            result.winners = sorted(
+                merged.items(), key=lambda item: item[1], reverse=True
+            )
             result.dead_money = dead
         self.bonus_pot = 0
 
@@ -400,7 +445,7 @@ class Table:
     def forfeit(self, user_id: int) -> int:
         """Remove a player and move their remaining stack into the dead pot."""
         player = self.player(user_id)
-        if player is None:
+        if player is None or player.kicked:
             return 0
 
         forfeited = 0
@@ -409,6 +454,9 @@ class Table:
             if index is not None:
                 forfeited = self.hand.state.stacks[index]
                 self.bonus_pot += forfeited
+                self.hand.forfeited_stacks[user_id] = (
+                    self.hand.forfeited_stacks.get(user_id, 0) + forfeited
+                )
 
         player.kicked = True
         player.chips = 0
