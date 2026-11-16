@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import re
 from io import BytesIO
+from typing import TYPE_CHECKING
 
 import discord
 from discord import app_commands
@@ -18,6 +19,9 @@ from .config import (
 )
 from .game import PokerGame
 from .visuals import render_help_chart
+
+if TYPE_CHECKING:
+    from .bot import PokerBot
 
 EMBED_COLOR = 0x145A43
 GOLD = 0xE8BC5C
@@ -43,7 +47,7 @@ def parse_action(content: str) -> tuple[str, int | None] | None:
 
 
 class PokerCog(commands.Cog):
-    def __init__(self, bot: commands.Bot) -> None:
+    def __init__(self, bot: PokerBot) -> None:
         self.bot = bot
 
     # ---------------------------------------------------------------- economy
@@ -346,6 +350,7 @@ class PokerCog(commands.Cog):
             action = parse_action(message.content)
             if action is None or game is None or game.state != "running":
                 return
+            self.bot.track_user(message.author)
             action_name, amount = action
             ok, response = await game.submit_action(
                 message.author, action_name, amount
@@ -366,6 +371,7 @@ class PokerCog(commands.Cog):
             )
             return
 
+        self.bot.track_user(message.author)
         if text == "join game":
             _ok, response = await game.join(message.author)
         else:

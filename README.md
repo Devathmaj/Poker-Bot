@@ -112,6 +112,32 @@ Private hole-card view:
 
 ![Hole cards](docs/preview-hand.png)
 
+## Recorded players and servers
+
+The bot keeps an audience log in the same PostgreSQL database; the tables are
+created automatically on startup.
+
+| Table | Columns |
+| --- | --- |
+| `users` | `user_id`, `chips`, `last_daily`, `username`, `display_name`, `added_at`, `updated_at` |
+| `discord_guilds` | `guild_id`, `name`, `added_at`, `removed_at` |
+| `guild_events` | `id`, `guild_id`, `name`, `event` (`added`/`removed`), `occurred_at` |
+
+- A player's name is stored on their wallet row in `users` the first time they
+  use a command or act in a hand, and refreshed at most once an hour.
+- A server is recorded when the bot joins it. The list is reconciled on every
+  reconnect, so servers the bot was kicked from while it was offline are still
+  marked. `added_at` is the start of the current tenure and `removed_at` is
+  `NULL` while the bot is in the server.
+- `guild_events` is an append-only history, so an earlier kick is still visible
+  after the bot is re-added.
+
+```sql
+SELECT user_id, username, display_name, added_at FROM users ORDER BY added_at;
+SELECT * FROM discord_guilds ORDER BY added_at;
+SELECT * FROM guild_events   ORDER BY occurred_at;
+```
+
 ## Project layout
 
 ```
@@ -122,7 +148,7 @@ pokerbot/
   engine.py     poker rules wrapper, seating/blinds rotation, CSPRNG-shuffled deck
   ui.py         lobby/action buttons and raise modal
   visuals.py    Pillow table, hole-card, and hand-ranking renders
-  store.py      PostgreSQL chip wallet and lifetime poker stats (DATABASE_URL)
+  store.py      PostgreSQL chip wallet, poker stats, player/server tracking
 assets/cards/   MIT-licensed playing card PNGs + LICENSE
 tests/          engine, wallet, and headless game-loop tests
 ```

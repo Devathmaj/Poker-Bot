@@ -78,6 +78,10 @@ class FakeBot:
     def __init__(self, store: MemoryStore) -> None:
         self.store = store
         self.games: dict[int, PokerGame] = {}
+        self.tracked: list[int] = []
+
+    def track_user(self, user) -> None:
+        self.tracked.append(user.id)
 
 
 class GameFlowTests(unittest.IsolatedAsyncioTestCase):

@@ -27,6 +27,15 @@ _SCHEMAS = (
         last_daily DATE
     )
     """,
+    # Identity lives on the same row as the wallet. Databases created before
+    # these columns existed get them added in place.
+    """
+    ALTER TABLE users
+        ADD COLUMN IF NOT EXISTS username TEXT,
+        ADD COLUMN IF NOT EXISTS display_name TEXT,
+        ADD COLUMN IF NOT EXISTS added_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    """,
     """
     CREATE TABLE IF NOT EXISTS player_stats (
         user_id BIGINT PRIMARY KEY,
@@ -35,6 +44,23 @@ _SCHEMAS = (
         hands_won BIGINT NOT NULL DEFAULT 0,
         biggest_pot BIGINT NOT NULL DEFAULT 0,
         net_chips BIGINT NOT NULL DEFAULT 0
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS discord_guilds (
+        guild_id BIGINT PRIMARY KEY,
+        name TEXT NOT NULL,
+        added_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        removed_at TIMESTAMPTZ
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS guild_events (
+        id BIGSERIAL PRIMARY KEY,
+        guild_id BIGINT NOT NULL,
+        name TEXT NOT NULL,
+        event TEXT NOT NULL CHECK (event IN ('added', 'removed')),
+        occurred_at TIMESTAMPTZ NOT NULL DEFAULT now()
     )
     """,
 )
@@ -87,15 +113,38 @@ class ChipStore:
         self._database_url = database_url
         self._connection = self._connect()
         self._create_tables()
+        self._fold_legacy_users()
         self._lock = asyncio.Lock()
+
+    def _fold_legacy_users(self) -> None:
+        """Merge the short-lived ``discord_users`` table into ``users``."""
+        with self._connection.transaction():
+            found = self._connection.execute(
+                "SELECT to_regclass('discord_users') AS name"
+            ).fetchone()
+            if found is None or found["name"] is None:
+                return
+            self._connection.execute(
+                "INSERT INTO users "
+                "(user_id, username, display_name, added_at, updated_at) "
+                "SELECT user_id, username, display_name, added_at, updated_at "
+                "FROM discord_users "
+                "ON CONFLICT (user_id) DO UPDATE SET "
+                "username = COALESCE(EXCLUDED.username, users.username), "
+                "display_name = COALESCE(EXCLUDED.display_name, users.display_name), "
+                "added_at = LEAST(users.added_at, EXCLUDED.added_at), "
+                "updated_at = GREATEST(users.updated_at, EXCLUDED.updated_at)"
+            )
+            self._connection.execute("DROP TABLE discord_users")
+            logger.info("Merged discord_users into users")
 
     def _create_tables(
         self, connection: psycopg.Connection | None = None
     ) -> None:
         connection = connection or self._connection
-        for schema in _SCHEMAS:
-            connection.execute(schema)
-        connection.commit()
+        with connection.transaction():
+            for schema in _SCHEMAS:
+                connection.execute(schema)
 
     def _connect(self) -> psycopg.Connection:
         return psycopg.connect(
@@ -103,6 +152,9 @@ class ChipStore:
             row_factory=dict_row,
             application_name="pokerbot",
             connect_timeout=10,
+            # Single-statement reads must not leave an idle transaction open:
+            # it holds locks that block schema changes and pins the session.
+            autocommit=True,
             # Keep the pooled session alive so an idle game does not lose its
             # connection while nobody is claiming chips.
             keepalives=1,
@@ -308,6 +360,133 @@ class ChipStore:
     ) -> ProfileData:
         today = today or datetime.now(UTC).date()
         return await self._call(self._profile, user_id, today)
+
+    # ---------------------------------------------------------------- audience
+    def _remember_user(
+        self, user_id: int, username: str, display_name: str | None
+    ) -> None:
+        with self._connection.transaction():
+            self._connection.execute(
+                "INSERT INTO users (user_id, username, display_name) "
+                "VALUES (%s, %s, %s) "
+                "ON CONFLICT (user_id) DO UPDATE SET "
+                "username = EXCLUDED.username, "
+                "display_name = EXCLUDED.display_name, "
+                "updated_at = now()",
+                (user_id, username, display_name),
+            )
+
+    async def remember_user(
+        self, user_id: int, username: str, display_name: str | None = None
+    ) -> None:
+        """Store (or refresh) a player who used the bot."""
+        await self._call(self._remember_user, user_id, username, display_name)
+
+    def _sync_guilds(self, guilds: list[tuple[int, str]]) -> None:
+        current_ids = {guild_id for guild_id, _ in guilds}
+        with self._connection.transaction():
+            rows = self._connection.execute(
+                "SELECT guild_id, name, removed_at FROM discord_guilds"
+            ).fetchall()
+            known = {
+                int(row["guild_id"]): (row["name"], row["removed_at"])
+                for row in rows
+            }
+
+            added: list[tuple[int, str]] = []
+            renamed: list[tuple[str, int]] = []
+            for guild_id, name in guilds:
+                previous = known.get(guild_id)
+                if previous is None or previous[1] is not None:
+                    # First time we see a server, or the bot is back after
+                    # being kicked: start a new tenancy.
+                    added.append((guild_id, name))
+                elif previous[0] != name:
+                    renamed.append((name, guild_id))
+
+            removed = [
+                (guild_id, name)
+                for guild_id, (name, removed_at) in known.items()
+                if removed_at is None and guild_id not in current_ids
+            ]
+
+            # ``executemany`` pipelines these statements, so the number of
+            # network round trips does not grow with the server count.
+            with self._connection.cursor() as cursor:
+                if added:
+                    cursor.executemany(
+                        "INSERT INTO discord_guilds "
+                        "(guild_id, name, added_at, removed_at) "
+                        "VALUES (%s, %s, now(), NULL) "
+                        "ON CONFLICT (guild_id) DO UPDATE SET "
+                        "name = EXCLUDED.name, added_at = EXCLUDED.added_at, "
+                        "removed_at = NULL",
+                        added,
+                    )
+                    cursor.executemany(
+                        "INSERT INTO guild_events (guild_id, name, event) "
+                        "VALUES (%s, %s, 'added')",
+                        added,
+                    )
+                if renamed:
+                    cursor.executemany(
+                        "UPDATE discord_guilds SET name = %s WHERE guild_id = %s",
+                        renamed,
+                    )
+                if removed:
+                    cursor.executemany(
+                        "UPDATE discord_guilds SET removed_at = now() "
+                        "WHERE guild_id = %s",
+                        [(guild_id,) for guild_id, _ in removed],
+                    )
+                    cursor.executemany(
+                        "INSERT INTO guild_events (guild_id, name, event) "
+                        "VALUES (%s, %s, 'removed')",
+                        removed,
+                    )
+
+    async def sync_guilds(self, guilds: list[tuple[int, str]]) -> None:
+        """Reconcile stored servers with the ones the bot is currently in.
+
+        This catches changes that happened while the bot was offline, including
+        being kicked from a server.
+        """
+        await self._call(self._sync_guilds, guilds)
+
+    def _record_guild_added(self, guild_id: int, name: str) -> None:
+        with self._connection.transaction():
+            self._connection.execute(
+                "INSERT INTO discord_guilds (guild_id, name, added_at, removed_at) "
+                "VALUES (%s, %s, now(), NULL) "
+                "ON CONFLICT (guild_id) DO UPDATE SET "
+                "name = EXCLUDED.name, added_at = EXCLUDED.added_at, "
+                "removed_at = NULL",
+                (guild_id, name),
+            )
+            self._connection.execute(
+                "INSERT INTO guild_events (guild_id, name, event) "
+                "VALUES (%s, %s, 'added')",
+                (guild_id, name),
+            )
+
+    async def record_guild_added(self, guild_id: int, name: str) -> None:
+        await self._call(self._record_guild_added, guild_id, name)
+
+    def _record_guild_removed(self, guild_id: int, name: str) -> None:
+        with self._connection.transaction():
+            self._connection.execute(
+                "UPDATE discord_guilds SET name = %s, removed_at = now() "
+                "WHERE guild_id = %s",
+                (name, guild_id),
+            )
+            self._connection.execute(
+                "INSERT INTO guild_events (guild_id, name, event) "
+                "VALUES (%s, %s, 'removed')",
+                (guild_id, name),
+            )
+
+    async def record_guild_removed(self, guild_id: int, name: str) -> None:
+        await self._call(self._record_guild_removed, guild_id, name)
 
     async def close(self) -> None:
         async with self._lock:

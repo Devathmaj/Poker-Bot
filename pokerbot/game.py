@@ -145,6 +145,7 @@ class PokerGame:
                 f"**{balance:,}**. Use `/daily` to claim more."
             )
 
+        bot.track_user(host)
         game = cls(bot, channel, host, buy_in)
         game.table.players.append(
             Player(host.id, host.display_name, buy_in)
@@ -213,6 +214,7 @@ class PokerGame:
                 f"**{balance:,}**. Use `/daily` to claim more."
             )
 
+        self.bot.track_user(user)
         self.table.players.append(
             Player(user.id, user.display_name, self.buy_in)
         )

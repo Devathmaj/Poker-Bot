@@ -11,6 +11,7 @@ from urllib.parse import quote
 
 import psycopg
 from dotenv import load_dotenv
+from psycopg.rows import dict_row
 
 from pokerbot.store import ChipStore, HandStat
 
@@ -49,6 +50,12 @@ class StoreTests(unittest.IsolatedAsyncioTestCase):
         if hasattr(self, "admin"):
             self.admin.execute(f'DROP SCHEMA IF EXISTS "{self.schema}" CASCADE')
             self.admin.close()
+
+    def query(self, sql: str, params=None) -> list[dict]:
+        with psycopg.connect(
+            with_schema(DATABASE_URL, self.schema), row_factory=dict_row
+        ) as connection:
+            return connection.execute(sql, params).fetchall()
 
     async def test_daily_claim_is_once_per_day(self) -> None:
         first = await self.store.claim_daily(1, 1000, date(2026, 11, 16))
@@ -96,6 +103,90 @@ class StoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(profile.biggest_pot, 300)
         self.assertEqual(profile.net_chips, 100)
         self.assertAlmostEqual(profile.hand_win_rate, 0.5)
+
+    async def test_players_are_recorded_with_names(self) -> None:
+        await self.store.remember_user(1, "alice", "Alice")
+        await self.store.remember_user(1, "alice_renamed", "Alice Renamed")
+
+        rows = self.query(
+            "SELECT user_id, username, display_name, added_at, updated_at, chips "
+            "FROM users"
+        )
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["user_id"], 1)
+        self.assertEqual(rows[0]["username"], "alice_renamed")
+        self.assertEqual(rows[0]["display_name"], "Alice Renamed")
+        self.assertEqual(rows[0]["chips"], 0)
+        self.assertIsNotNone(rows[0]["added_at"])
+        self.assertGreaterEqual(rows[0]["updated_at"], rows[0]["added_at"])
+
+        # The name refresh must not touch the wallet.
+        await self.store.credit(1, 250)
+        await self.store.remember_user(1, "alice_third", "Alice Third")
+        self.assertEqual(await self.store.balance(1), 250)
+        self.assertEqual(
+            self.query("SELECT username FROM users WHERE user_id = 1")[0][
+                "username"
+            ],
+            "alice_third",
+        )
+
+    async def test_servers_are_tracked_and_kicks_are_recorded(self) -> None:
+        await self.store.sync_guilds([(100, "Alpha"), (200, "Beta")])
+
+        rows = self.query(
+            "SELECT guild_id, name, added_at, removed_at "
+            "FROM discord_guilds ORDER BY guild_id"
+        )
+        self.assertEqual([row["guild_id"] for row in rows], [100, 200])
+        self.assertTrue(all(row["removed_at"] is None for row in rows))
+        self.assertIsNotNone(rows[0]["added_at"])
+
+        # Beta was removed while the bot was offline; Alpha was renamed.
+        await self.store.sync_guilds([(100, "Alpha Renamed")])
+        rows = self.query(
+            "SELECT guild_id, name, removed_at FROM discord_guilds "
+            "ORDER BY guild_id"
+        )
+        self.assertEqual(rows[0]["name"], "Alpha Renamed")
+        self.assertIsNone(rows[0]["removed_at"])
+        self.assertIsNotNone(rows[1]["removed_at"])
+
+        # Beta is added back.
+        await self.store.sync_guilds([(100, "Alpha Renamed"), (200, "Beta")])
+        rows = self.query(
+            "SELECT guild_id, removed_at FROM discord_guilds ORDER BY guild_id"
+        )
+        self.assertIsNone(rows[1]["removed_at"])
+
+        events = self.query(
+            "SELECT guild_id, event FROM guild_events ORDER BY id"
+        )
+        self.assertEqual(
+            [(row["guild_id"], row["event"]) for row in events],
+            [
+                (100, "added"),
+                (200, "added"),
+                (200, "removed"),
+                (200, "added"),
+            ],
+        )
+
+    async def test_live_server_join_and_remove_are_recorded(self) -> None:
+        await self.store.record_guild_added(300, "Gamma")
+        await self.store.record_guild_removed(300, "Gamma")
+
+        row = self.query(
+            "SELECT name, added_at, removed_at FROM discord_guilds "
+            "WHERE guild_id = 300"
+        )[0]
+        self.assertEqual(row["name"], "Gamma")
+        self.assertIsNotNone(row["added_at"])
+        self.assertIsNotNone(row["removed_at"])
+        events = self.query(
+            "SELECT event FROM guild_events WHERE guild_id = 300 ORDER BY id"
+        )
+        self.assertEqual([event["event"] for event in events], ["added", "removed"])
 
     async def test_debit_is_atomic_and_credit_adds(self) -> None:
         self.assertIsNone(await self.store.debit(2, 500))

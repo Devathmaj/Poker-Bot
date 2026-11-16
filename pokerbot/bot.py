@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import time
 from contextlib import suppress
 from typing import TYPE_CHECKING
 
@@ -18,6 +20,9 @@ if TYPE_CHECKING:
     from .game import PokerGame
 
 logger = logging.getLogger(__name__)
+
+# Refresh a player's stored name at most once an hour per process.
+_TRACK_REFRESH_SECONDS = 3600
 
 
 class PokerBot(commands.Bot):
@@ -37,6 +42,44 @@ class PokerBot(commands.Bot):
         self.store = ChipStore(DATABASE_URL)
         self.games: dict[int, PokerGame] = {}
         self.tree.on_error = self.on_app_command_error
+        self.tree.interaction_check = self._track_interaction
+        self._tracked_users: dict[int, float] = {}
+        self._background: set[asyncio.Task] = set()
+
+    # --------------------------------------------------------------- audience
+    async def _track_interaction(
+        self, interaction: discord.Interaction
+    ) -> bool:
+        self.track_user(interaction.user)
+        return True
+
+    def track_user(self, user: discord.abc.User) -> None:
+        """Remember a player who used the bot.
+
+        The write happens in the background so it can never slow down the
+        three-second interaction acknowledgement. Names are refreshed at most
+        once an hour per process.
+        """
+        now = time.monotonic()
+        last = self._tracked_users.get(user.id)
+        if last is not None and now - last < _TRACK_REFRESH_SECONDS:
+            return
+        self._tracked_users[user.id] = now
+        task = asyncio.create_task(self._remember_user(user))
+        self._background.add(task)
+        task.add_done_callback(self._background.discard)
+
+    async def _remember_user(self, user: discord.abc.User) -> None:
+        try:
+            await self.store.remember_user(
+                user.id,
+                getattr(user, "name", None) or user.display_name,
+                getattr(user, "display_name", None),
+            )
+        except Exception:
+            # Drop the cache entry so the next interaction tries again.
+            self._tracked_users.pop(user.id, None)
+            logger.exception("Could not record user %s", user.id)
 
     async def on_app_command_error(
         self,
@@ -95,11 +138,37 @@ class PokerBot(commands.Bot):
         user = self.user
         logger.info("Logged in as %s (%s)", user, getattr(user, "id", "?"))
 
+        # Reconcile the server list every time we connect, so joins and kicks
+        # that happened while the bot was offline are still recorded.
+        guilds = [(guild.id, guild.name) for guild in self.guilds]
+        try:
+            await self.store.sync_guilds(guilds)
+            logger.info("Tracking %s server(s)", len(guilds))
+        except Exception:
+            logger.exception("Could not sync the server list")
+
+    async def on_guild_join(self, guild: discord.Guild) -> None:
+        try:
+            await self.store.record_guild_added(guild.id, guild.name)
+        except Exception:
+            logger.exception("Could not record joining %s", guild.id)
+        logger.info("Added to server %s (%s)", guild.name, guild.id)
+
+    async def on_guild_remove(self, guild: discord.Guild) -> None:
+        try:
+            await self.store.record_guild_removed(guild.id, guild.name)
+        except Exception:
+            logger.exception("Could not record leaving %s", guild.id)
+        logger.info("Removed from server %s (%s)", guild.name, guild.id)
+
     async def close(self) -> None:
         # Never strand a table's chips if the bot is stopped mid-game.
         for game in list(self.games.values()):
             with suppress(Exception):
                 await game.end("The bot is shutting down; remaining stacks were cashed out.")
+        # Let pending bookkeeping writes finish before the pool is closed.
+        if self._background:
+            await asyncio.gather(*self._background, return_exceptions=True)
         with suppress(Exception):
             await self.store.close()
         await super().close()
