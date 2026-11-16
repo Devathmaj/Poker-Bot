@@ -8,6 +8,7 @@ A Python Discord bot for no-limit Texas Hold'em with persistent chip wallets, da
 
 - **`/profile [user]`** — view your own or another player's avatar, username, wallet, daily availability/cooldown, and poker progress: games played, hands played, hands won, hand win rate, biggest pot won, and net chips.
 - **`/daily`** — claim **1,000** chips every 24 hours.
+- **`/balance`** — check how many chips you have.
 - **`/creategame [buy_in]`** — opens a table in the channel and joins the host automatically. The buy-in (default **500**) becomes the host's starting stack.
 - **`join game`** — typed in the channel, or use the **Join game** button. Does nothing if no table exists.
 - **`start game`** — the host starts the game by typing this or pressing **Start game**.
@@ -72,6 +73,7 @@ Requires **Python 3.11+** and a **PostgreSQL** database.
 | Command | Who | What it does |
 | --- | --- | --- |
 | `/daily` | everyone | Claims 1,000 chips every 24 hours and shows your balance. |
+| `/balance` | everyone | Shows your current chip balance. |
 | `/profile [user]` | everyone | Shows your profile, or another member's, including avatar, username, wallet, daily status/cooldown, and poker stats (games, hands, hand wins/rate, biggest pot, net chips). Public message. |
 | `/help` | everyone | Rules, command list, and a generated hand-ranking chart. |
 | `/creategame [buy_in]` | everyone | Opens a table. Buy-in range is 100–100,000; default 500. One table per channel. |
@@ -146,7 +148,7 @@ SELECT * FROM guild_events   ORDER BY occurred_at;
 ```
 pokerbot/
   bot.py        Discord client, setup hook, graceful shutdown cash-out
-  cog.py        /daily, /help, /creategame, /endgame, /cards, typed join/start
+  cog.py        /daily, /balance, /profile, /help, /creategame, /endgame, /cards
   game.py       table orchestration, timers, timeouts, embeds, cashier
   engine.py     poker rules wrapper, seating/blinds rotation, CSPRNG-shuffled deck
   ui.py         lobby/action buttons and raise modal

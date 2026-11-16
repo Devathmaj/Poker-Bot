@@ -1,10 +1,45 @@
-"""Tests for exact-match chat actions."""
+"""Tests for slash-command helpers and exact-match chat actions."""
 
 from __future__ import annotations
 
 import unittest
+from datetime import UTC, datetime, timedelta
 
-from pokerbot.cog import parse_action
+from pokerbot.cog import format_countdown, parse_action
+
+
+class CountdownFormattingTests(unittest.TestCase):
+    def test_shows_hours_and_minutes(self) -> None:
+        now = datetime(2026, 11, 17, 12, 0, tzinfo=UTC)
+        self.assertEqual(
+            format_countdown(now + timedelta(hours=23, minutes=45), now),
+            "in 23h 45m",
+        )
+        self.assertEqual(
+            format_countdown(now + timedelta(hours=24), now), "in 24h"
+        )
+        self.assertEqual(
+            format_countdown(now + timedelta(minutes=59), now), "in 59m"
+        )
+
+    def test_rounds_up_partial_minutes(self) -> None:
+        now = datetime(2026, 11, 17, 12, 0, tzinfo=UTC)
+        self.assertEqual(
+            format_countdown(now + timedelta(seconds=1), now), "in 1m"
+        )
+        self.assertEqual(
+            format_countdown(
+                now + timedelta(hours=23, minutes=59, seconds=30), now
+            ),
+            "in 24h",
+        )
+
+    def test_finished_cooldowns_are_ready(self) -> None:
+        now = datetime(2026, 11, 17, 12, 0, tzinfo=UTC)
+        self.assertEqual(format_countdown(now, now), "ready now")
+        self.assertEqual(
+            format_countdown(now - timedelta(minutes=1), now), "ready now"
+        )
 
 
 class ActionParsingTests(unittest.TestCase):

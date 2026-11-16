@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+from datetime import UTC, datetime
 from io import BytesIO
 from typing import TYPE_CHECKING
 
@@ -46,6 +47,27 @@ def parse_action(content: str) -> tuple[str, int | None] | None:
     return "raise", amount
 
 
+def format_countdown(until: datetime, now: datetime | None = None) -> str:
+    """Describe a cooldown precisely, like ``in 23h 45m``.
+
+    Discord's relative timestamps only get as precise as "in a day" at this
+    range, which hides how long is actually left, so daily timers are rendered
+    as hours and minutes instead.
+    """
+    remaining = until - (now or datetime.now(UTC))
+    seconds = int(remaining.total_seconds())
+    if seconds <= 0:
+        return "ready now"
+    # Round up so a cooldown that is seconds away never shows "0m".
+    minutes = seconds // 60 + (1 if seconds % 60 else 0)
+    hours, minutes = divmod(minutes, 60)
+    if not hours:
+        return f"in {minutes}m"
+    if not minutes:
+        return f"in {hours}h"
+    return f"in {hours}h {minutes:02d}m"
+
+
 class PokerCog(commands.Cog):
     def __init__(self, bot: PokerBot) -> None:
         self.bot = bot
@@ -75,7 +97,7 @@ class PokerCog(commands.Cog):
             )
             embed.add_field(
                 name="Next claim",
-                value=f"<t:{int(claim.next_claim.timestamp())}:R>",
+                value=format_countdown(claim.next_claim),
                 inline=True,
             )
         else:
@@ -83,13 +105,27 @@ class PokerCog(commands.Cog):
                 title="Daily already claimed",
                 description=(
                     f"You already collected your daily chips.\n"
-                    f"Next claim: <t:{int(claim.next_claim.timestamp())}:R>"
+                    f"Next claim: {format_countdown(claim.next_claim)}"
                 ),
                 color=EMBED_COLOR,
             )
             embed.add_field(
                 name="Balance", value=f"**{claim.balance:,}** chips", inline=True
             )
+        await interaction.followup.send(embed=embed)
+
+    @app_commands.command(
+        name="balance",
+        description="Check how many chips you have.",
+    )
+    async def balance(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer()
+        balance = await self.bot.store.balance(interaction.user.id)
+        embed = discord.Embed(
+            title="💰 Your balance",
+            description=f"You have **{balance:,}** chips.",
+            color=GOLD,
+        )
         await interaction.followup.send(embed=embed)
 
     # ----------------------------------------------------------------- profile
@@ -119,7 +155,7 @@ class PokerCog(commands.Cog):
         if data.can_claim_daily:
             daily = "✅ Ready — use `/daily`"
         else:
-            daily = f"⏳ <t:{int(data.next_claim.timestamp())}:R>"
+            daily = f"⏳ {format_countdown(data.next_claim)}"
         embed.add_field(name="Daily", value=daily, inline=True)
         embed.add_field(
             name="Games played", value=f"{data.games_played:,}", inline=True
@@ -191,6 +227,7 @@ class PokerCog(commands.Cog):
             name="Chips",
             value=(
                 f"Use `/daily` every 24 hours for **{DAILY_CHIPS:,}** chips. "
+                f"Check your wallet any time with `/balance`. "
                 f"`/creategame [buy_in]` opens a table and takes the buy-in "
                 f"(default {DEFAULT_BUY_IN:,}). Buy-in chips become your stack; "
                 "at the end of the game your remaining stack is paid back to "
@@ -202,6 +239,7 @@ class PokerCog(commands.Cog):
             name="Commands",
             value=(
                 "`/daily` — claim chips\n"
+                "`/balance` — check your chip balance\n"
                 "`/profile [user]` — view your or another player's profile\n"
                 "`/creategame [buy_in]` — open a table (host joins automatically)\n"
                 "Type `join game` — take a seat in the lobby\n"
