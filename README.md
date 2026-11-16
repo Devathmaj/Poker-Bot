@@ -15,8 +15,8 @@ A Python Discord bot for no-limit Texas Hold'em with persistent chip wallets, da
 - **`start game`** — the host starts the game by typing this or pressing **Start game**.
 - **Full no-limit Hold'em** — blinds, four betting rounds, all-ins, side pots, split pots, min-raise rules, and showdowns are handled by [PokerKit](https://github.com/uoftcprg/pokerkit).
 - **Chat actions** — during your turn, type exactly `check`, `call`, `raise <amount>`, `all in`, or `fold` in the channel. Partial messages such as `call now` are ignored. The action buttons still work.
-- **Private cards** — a **View my cards** button appears in the channel at the start of every hand. Pressing it (or using `/cards`) shows your hole cards and current best hand in an ephemeral reply that only you can see. No DMs required. All other bot messages are public by default.
-- **Public table** — a rendered table image shows stacks, bets, the button, community cards, pot, folded/removed players, and hole cards only at showdown.
+- **Private cards** — a **View my cards** button sits on the table message, so no extra message is posted below the table. Pressing it (or using `/cards`) shows your hole cards and current best hand in an ephemeral reply that only you can see. No DMs required. All other bot messages are public by default.
+- **Public table** — a rendered table image shows stacks, bets, the button, community cards, pot, folded/removed players, and hole cards only at showdown. Action confirmations are private, and whenever newer messages would push the table up, it is re-posted at the bottom of the channel so the live table is always the last thing on screen.
 - **Turn timer** — each player has **60 seconds**. Missing the deadline auto-folds.
 - **Timeout removal** — after more than **3** timeouts (the 4th), the player is removed from the table and their remaining stack is forfeited to the pot.
 - **`/endgame`** — the host or a server admin closes the table immediately. Remaining stacks are cashed back into wallets.

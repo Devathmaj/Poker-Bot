@@ -28,7 +28,7 @@ from .config import (
 )
 from .engine import Hand, HandResult, IllegalAction, Player, Table
 from .store import HandStat
-from .ui import ActionView, CardsView, LobbyView
+from .ui import ActionView, LobbyView
 from .visuals import (
     PlayerVisual,
     TableVisual,
@@ -45,6 +45,11 @@ logger = logging.getLogger(__name__)
 EMBED_COLOR = 0x145A43
 GOLD = 0xE8BC5C
 RED = 0xD8584E
+
+# Re-posting the table re-uploads its image, so keep it to at most one move
+# every few seconds. Anything posted in between is a message or two above the
+# table at worst, which is still on screen.
+TABLE_ANCHOR_COOLDOWN = 1.5
 
 RANK_WORD = {
     "A": "Ace",
@@ -144,12 +149,12 @@ class PokerGame:
         self.state = "lobby"
         self.lobby_message: discord.Message | None = None
         self.table_message: discord.Message | None = None
-        self.cards_message: discord.Message | None = None
         self.pending: PendingTurn | None = None
         self.task: asyncio.Task | None = None
         self._settled = False
         self._settling = False
         self._settle_lock = asyncio.Lock()
+        self._anchored_at = float("-inf")
 
     # ------------------------------------------------------------------ setup
     @classmethod
@@ -397,23 +402,12 @@ class PokerGame:
 
     async def _begin_hand(self) -> None:
         self.pending = None
-        self.table_message = None
-
-        embed = self._table_embed()
-        image = await asyncio.to_thread(render_table, self._visual())
-        file = discord.File(BytesIO(image), filename="table.png")
-        embed.set_image(url="attachment://table.png")
-        self.table_message = await self.channel.send(embed=embed, file=file)
-
-        if self.cards_message is not None:
+        # The finished hand's table keeps its result in the channel, but its
+        # buttons belong to a hand that no longer exists.
+        if self.table_message is not None:
             with suppress(discord.HTTPException):
-                await self.cards_message.edit(view=None)
-        self.cards_message = await self.channel.send(
-            "🃏 **Hole cards are in.** Press **View my cards** or use "
-            "`/cards` — only you can see them.",
-            view=CardsView(self),
-            allowed_mentions=discord.AllowedMentions.none(),
-        )
+                await self.table_message.edit(view=None)
+        self.table_message = None
 
     async def _play_hand(self, hand: Hand) -> None:
         while self.state == "running" and not hand.is_over:
@@ -454,9 +448,11 @@ class PokerGame:
 
         future = asyncio.get_running_loop().create_future()
         pending = PendingTurn(actor_id, future)
-        self.pending = pending
         deadline = time.time() + TURN_SECONDS
+        # Show the table first, then arm the turn, so the prompt is on screen
+        # before anyone can act on it.
         await self._update_table(actor_id=actor_id, deadline=deadline)
+        self.pending = pending
 
         try:
             action, amount = await asyncio.wait_for(future, TURN_SECONDS)
@@ -751,7 +747,7 @@ class PokerGame:
                     f"**{hand.street}** · pot **{hand.pot + self.table.bonus_pot:,}**\n"
                     f"<@{actor_id}> is up · <t:{int(deadline)}:R>\n"
                     "Type `check`, `call`, `raise <amount>`, `all in`, "
-                    "or `fold`."
+                    "or `fold` — or press a button below."
                 )
             else:
                 embed.description = (
@@ -767,6 +763,37 @@ class PokerGame:
             )
         )
         return embed
+
+    async def _repost_table_when_buried(self) -> None:
+        """Move the table back to the bottom when newer messages sit below it.
+
+        Discord has no way to move a message, so the table is deleted and
+        rendered again underneath the chatter. Every table update runs this,
+        which means the table is always the last thing in the channel when a
+        player has to act.
+        """
+        message = self.table_message
+        if message is None:
+            return
+        latest = self.channel.last_message_id
+        # Snowflakes grow over time, so a newer message is strictly larger.
+        # A missing or older value means the table is still the newest thing
+        # we know about (which also avoids racing our own just-sent message).
+        if latest is None or latest <= message.id:
+            return
+        now = time.monotonic()
+        if now - self._anchored_at < TABLE_ANCHOR_COOLDOWN:
+            return
+        self._anchored_at = now
+        try:
+            await message.delete()
+        except discord.NotFound:
+            pass
+        except discord.HTTPException:
+            # Keep the old table intact rather than posting a duplicate.
+            return
+        if self.table_message is message:
+            self.table_message = None
 
     async def _update_table(
         self,
@@ -785,11 +812,13 @@ class PokerGame:
         embed = self._table_embed(
             actor_id=actor_id, deadline=deadline, result=result
         )
-        view = (
-            ActionView(self)
-            if result is None and self.pending is not None
-            else None
-        )
+        # The card button lives on the table itself, so a hand needs no
+        # separate message under it. At showdown only that button remains.
+        view = ActionView(self, showdown=result is not None)
+
+        # Keep the newest table state at the bottom of the channel, even if
+        # chat messages (or our own notices) landed underneath the last one.
+        await self._repost_table_when_buried()
 
         if self.table_message is None:
             self.table_message = await self.channel.send(
@@ -866,9 +895,6 @@ class PokerGame:
             if self.table_message is not None:
                 with suppress(discord.HTTPException):
                     await self.table_message.edit(view=None)
-            if self.cards_message is not None:
-                with suppress(discord.HTTPException):
-                    await self.cards_message.edit(view=None)
             if self.lobby_message is not None:
                 with suppress(discord.HTTPException):
                     await self.lobby_message.edit(view=None)

@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 import discord
 
 from .config import TURN_SECONDS
+from .engine import IllegalAction
 
 if TYPE_CHECKING:
     from .game import PokerGame
@@ -100,36 +101,6 @@ class LobbyView(PokerView):
                 await self.game.launch()
 
 
-class CardsView(PokerView):
-    """Button on the public table that reveals cards only to the presser."""
-
-    def __init__(self, game: PokerGame) -> None:
-        super().__init__(timeout=None)
-        self.game = game
-
-    @discord.ui.button(
-        label="View my cards", style=discord.ButtonStyle.primary
-    )
-    async def view_cards(
-        self, interaction: discord.Interaction, button: discord.ui.Button
-    ) -> None:
-        await interaction.response.defer(ephemeral=True)
-        data = await asyncio.to_thread(
-            self.game.cards_image, interaction.user.id
-        )
-        if data is None:
-            await interaction.followup.send(
-                "You are not in a live hand right now.", ephemeral=True
-            )
-            return
-        image, label = data
-        await interaction.followup.send(
-            content=f"**Your hand:** {label}",
-            file=discord.File(BytesIO(image), filename="your-hand.png"),
-            ephemeral=True,
-        )
-
-
 class RaiseModal(discord.ui.Modal, title="Raise the bet"):
     amount = discord.ui.TextInput(
         label="Raise to (total chips)",
@@ -159,7 +130,7 @@ class RaiseModal(discord.ui.Modal, title="Raise the bet"):
     async def on_submit(self, interaction: discord.Interaction) -> None:
         if interaction.user.id != self.user.id:
             await interaction.response.send_message(
-                "This raise window belongs to another player."
+                "This raise window belongs to another player.", ephemeral=True
             )
             return
         raw = str(self.amount.value).replace(",", "").replace(" ", "").strip()
@@ -167,54 +138,86 @@ class RaiseModal(discord.ui.Modal, title="Raise the bet"):
             value = int(raw)
         except ValueError:
             await interaction.response.send_message(
-                "Enter a whole number of chips."
+                "Enter a whole number of chips.", ephemeral=True
             )
             return
 
-        await interaction.response.defer()
+        # Keep the confirmation private so it never pushes the table up.
+        await interaction.response.defer(ephemeral=True)
         _ok, message = await self.game.submit_action(
             interaction.user, "raise", value
         )
-        await interaction.followup.send(message)
+        await interaction.followup.send(message, ephemeral=True)
 
 
 class ActionView(PokerView):
-    def __init__(self, game: PokerGame) -> None:
+    """Buttons attached to the live table.
+
+    The hole-card button is always available, while the betting buttons only
+    do something for the player who is on the clock. Keeping both on the
+    table message means no extra messages need to be posted under it.
+    """
+
+    def __init__(self, game: PokerGame, *, showdown: bool = False) -> None:
         super().__init__(timeout=TURN_SECONDS + 20)
         self.game = game
 
         hand = game.table.hand
         legal = None
-        if hand is not None and hand.actor_id is not None:
-            legal = hand.legal_actions()
+        if not showdown and hand is not None and hand.actor_id is not None:
+            try:
+                legal = hand.legal_actions()
+            except IllegalAction:
+                legal = None
 
-        call_label = "Call"
-        if legal is not None:
-            call_label = (
-                "Check" if legal.call_amount == 0 else f"Call {legal.call_amount:,}"
+        if not showdown:
+            call_label = "Call"
+            if legal is not None:
+                call_label = (
+                    "Check"
+                    if legal.call_amount == 0
+                    else f"Call {legal.call_amount:,}"
+                )
+
+            waiting = legal is None
+            self.add_item(
+                self._action_button(
+                    "Fold",
+                    discord.ButtonStyle.danger,
+                    "fold",
+                    disabled=waiting,
+                )
+            )
+            self.add_item(
+                self._action_button(
+                    call_label,
+                    discord.ButtonStyle.primary,
+                    "call",
+                    disabled=waiting,
+                )
+            )
+            raise_button = self._action_button(
+                "Raise",
+                discord.ButtonStyle.secondary,
+                "raise",
+                disabled=waiting or not legal.can_raise,
+            )
+            raise_button.callback = self._raise
+            self.add_item(raise_button)
+            self.add_item(
+                self._action_button(
+                    "All-in",
+                    discord.ButtonStyle.secondary,
+                    "allin",
+                    disabled=waiting,
+                )
             )
 
-        self.add_item(
-            self._action_button("Fold", discord.ButtonStyle.danger, "fold")
+        cards_button = discord.ui.Button(
+            label="View my cards", style=discord.ButtonStyle.secondary
         )
-        self.add_item(
-            self._action_button(
-                call_label, discord.ButtonStyle.primary, "call"
-            )
-        )
-        raise_button = self._action_button(
-            "Raise",
-            discord.ButtonStyle.secondary,
-            "raise",
-            disabled=legal is None or not legal.can_raise,
-        )
-        raise_button.callback = self._raise
-        self.add_item(raise_button)
-        self.add_item(
-            self._action_button(
-                "All-in", discord.ButtonStyle.secondary, "allin"
-            )
-        )
+        cards_button.callback = self._view_cards
+        self.add_item(cards_button)
 
     def _action_button(self, label, style, action, *, disabled=False):
         button = discord.ui.Button(label=label, style=style, disabled=disabled)
@@ -225,9 +228,28 @@ class ActionView(PokerView):
         button.callback = callback
         return button
 
+    async def _view_cards(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True)
+        data = await asyncio.to_thread(
+            self.game.cards_image, interaction.user.id
+        )
+        if data is None:
+            await interaction.followup.send(
+                "You are not in a live hand right now.", ephemeral=True
+            )
+            return
+        image, label = data
+        await interaction.followup.send(
+            content=f"**Your hand:** {label}",
+            file=discord.File(BytesIO(image), filename="your-hand.png"),
+            ephemeral=True,
+        )
+
     async def _guard(self, interaction: discord.Interaction) -> bool:
         if self.game.state != "running":
-            await interaction.response.send_message("This game has ended.")
+            await interaction.response.send_message(
+                "This game has ended.", ephemeral=True
+            )
             return False
         if (
             self.game.table_message is None
@@ -235,20 +257,23 @@ class ActionView(PokerView):
             or interaction.message.id != self.game.table_message.id
         ):
             await interaction.response.send_message(
-                "This table view is out of date."
+                "This table view is out of date.", ephemeral=True
             )
             return False
         if not self.game.is_pending_actor(interaction.user.id):
-            await interaction.response.send_message("It is not your turn.")
+            await interaction.response.send_message(
+                "It is not your turn.", ephemeral=True
+            )
             return False
         return True
 
     async def _submit(self, interaction: discord.Interaction, action: str) -> None:
         if not await self._guard(interaction):
             return
-        await interaction.response.defer()
+        # Private acknowledgement keeps the table as the newest public post.
+        await interaction.response.defer(ephemeral=True)
         _ok, message = await self.game.submit_action(interaction.user, action)
-        await interaction.followup.send(message)
+        await interaction.followup.send(message, ephemeral=True)
 
     async def _raise(self, interaction: discord.Interaction) -> None:
         if not await self._guard(interaction):
@@ -256,7 +281,7 @@ class ActionView(PokerView):
         bounds = self.game.raise_bounds(interaction.user.id)
         if bounds is None:
             await interaction.response.send_message(
-                "You cannot raise right now."
+                "You cannot raise right now.", ephemeral=True
             )
             return
         minimum, maximum = bounds

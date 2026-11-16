@@ -8,7 +8,7 @@ import unittest
 from unittest.mock import patch
 
 from pokerbot.game import PokerGame, ordinal
-from pokerbot.ui import CardsView
+from pokerbot.ui import ActionView
 
 
 class FakeUser:
@@ -27,21 +27,36 @@ class FakeMessage:
         self.content = content
         self.edits: list[dict] = []
         self.kwargs = kwargs
+        self.deleted = False
 
     async def edit(self, **kwargs):
         self.edits.append(kwargs)
         return self
+
+    async def delete(self):
+        self.deleted = True
 
 
 class FakeChannel:
     def __init__(self) -> None:
         self.id = 424242
         self.messages: list[FakeMessage] = []
+        self.last_message_id: int | None = None
 
     async def send(self, content=None, **kwargs):
         message = FakeMessage(content, **kwargs)
         self.messages.append(message)
+        self.last_message_id = message.id
         return message
+
+
+def has_cards_button(message: FakeMessage) -> bool:
+    view = message.kwargs.get("view")
+    if not isinstance(view, ActionView):
+        return False
+    return any(
+        getattr(item, "label", None) == "View my cards" for item in view.children
+    )
 
 
 class MemoryStore:
@@ -137,6 +152,81 @@ class GameFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(attachment)
         self.assertEqual(attachment.filename, "hand-rankings.png")
 
+    async def test_table_message_carries_the_cards_button(self) -> None:
+        with patch("pokerbot.game.SHOWDOWN_PAUSE", 0.01), patch(
+            "pokerbot.game.STREET_PAUSE", 0.01
+        ):
+            game = await self._new_table()
+            self.assertIsNotNone(await self._next_actor(game))
+
+            table = game.table_message
+            self.assertIsNotNone(table)
+            self.assertTrue(has_cards_button(table))
+            # No extra "hole cards" message is posted under the table.
+            self.assertFalse(
+                any(
+                    "Hole cards are in" in str(message.content)
+                    for message in self.channel.messages
+                )
+            )
+            await game.end("test over")
+
+    async def test_table_moves_to_the_bottom_below_chatter(self) -> None:
+        with patch("pokerbot.game.SHOWDOWN_PAUSE", 0.01), patch(
+            "pokerbot.game.STREET_PAUSE", 0.01
+        ):
+            game = await self._new_table()
+            users = {self.host.id: self.host, self.guest.id: self.guest}
+            actor = await self._next_actor(game)
+            table = game.table_message
+            self.assertIsNotNone(table)
+
+            # A player typed their action in chat, leaving a message under
+            # the table and pushing it up the channel.
+            await self.channel.send("call")
+            ok, message = await game.submit_action(users[actor], "call")
+            self.assertTrue(ok, message)
+
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + 10
+            while loop.time() < deadline and (
+                game.table_message is table or game.table_message is None
+            ):
+                await asyncio.sleep(0.01)
+            await asyncio.sleep(0.05)
+
+            # The table was re-posted as the newest message, ready for the
+            # next player without any scrolling.
+            self.assertIsNot(game.table_message, table)
+            self.assertTrue(table.deleted)
+            self.assertIs(self.channel.messages[-1], game.table_message)
+            await game.end("test over")
+
+    async def test_table_is_edited_in_place_without_chatter(self) -> None:
+        with patch("pokerbot.game.SHOWDOWN_PAUSE", 0.01), patch(
+            "pokerbot.game.STREET_PAUSE", 0.01
+        ):
+            game = await self._new_table()
+            users = {self.host.id: self.host, self.guest.id: self.guest}
+            actor = await self._next_actor(game)
+            table = game.table_message
+            edits_before = len(table.edits)
+
+            ok, message = await game.submit_action(users[actor], "call")
+            self.assertTrue(ok, message)
+
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + 5
+            while loop.time() < deadline and len(table.edits) == edits_before:
+                await asyncio.sleep(0.01)
+            await asyncio.sleep(0.05)
+
+            # Nothing was posted under the table, so it stays where it is.
+            self.assertEqual(len(table.edits), edits_before + 1)
+            self.assertIs(game.table_message, table)
+            self.assertFalse(table.deleted)
+            await game.end("test over")
+
     async def test_check_call_hand_completes_and_chips_cash_out(self) -> None:
         with patch("pokerbot.game.SHOWDOWN_PAUSE", 0.01), patch(
             "pokerbot.game.STREET_PAUSE", 0.01
@@ -147,11 +237,10 @@ class GameFlowTests(unittest.IsolatedAsyncioTestCase):
             for _ in range(120):
                 actor = await self._next_actor(game)
                 if actor is not None:
+                    # The hole-card button lives on the table message, so a
+                    # hand never needs a separate card message below it.
                     self.assertTrue(
-                        any(
-                            isinstance(m.kwargs.get("view"), CardsView)
-                            for m in self.channel.messages
-                        )
+                        has_cards_button(game.table_message)
                     )
                 if actor is None:
                     break
