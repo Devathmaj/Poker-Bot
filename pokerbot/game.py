@@ -15,9 +15,11 @@ from pokerkit.hands import StandardHighHand
 
 from .config import (
     MAX_BUY_IN,
+    MAX_HANDS,
     MAX_PLAYERS,
     MAX_TIMEOUTS,
     MIN_BUY_IN,
+    MIN_HANDS,
     MIN_PLAYERS,
     SHOWDOWN_PAUSE,
     STREET_PAUSE,
@@ -86,6 +88,11 @@ def ordinal(number: int) -> str:
     return f"{number}{suffix}"
 
 
+def hands_label(count: int) -> str:
+    """Return ``1 hand`` or ``50 hands``."""
+    return f"{count:,} hand" if count == 1 else f"{count:,} hands"
+
+
 def describe_hole_cards(cards: list[str]) -> str:
     if len(cards) < 2:
         return "No cards"
@@ -124,11 +131,13 @@ class PokerGame:
         channel: discord.TextChannel,
         host: discord.abc.User,
         buy_in: int,
+        hands_limit: int | None = None,
     ) -> None:
         self.bot = bot
         self.channel = channel
         self.host_id = host.id
         self.buy_in = buy_in
+        self.hands_limit = hands_limit
         self.small_blind, self.big_blind = blinds_for_buy_in(buy_in)
         self.table = Table([], self.small_blind, self.big_blind)
 
@@ -150,6 +159,7 @@ class PokerGame:
         channel: discord.TextChannel,
         host: discord.abc.User,
         buy_in: int,
+        hands: int | None = None,
     ) -> tuple[PokerGame | None, str | None]:
         if channel.id in bot.games:
             return None, "There is already a poker table in this channel."
@@ -158,6 +168,12 @@ class PokerGame:
             return None, (
                 f"Buy-in must be between **{MIN_BUY_IN:,}** and "
                 f"**{MAX_BUY_IN:,}** chips."
+            )
+
+        if hands is not None and not MIN_HANDS <= hands <= MAX_HANDS:
+            return None, (
+                f"Hand limit must be between **{MIN_HANDS:,}** and "
+                f"**{MAX_HANDS:,}** hands, or omitted for an unlimited game."
             )
 
         new_balance = await bot.store.debit(host.id, buy_in)
@@ -169,7 +185,7 @@ class PokerGame:
             )
 
         bot.track_user(host)
-        game = cls(bot, channel, host, buy_in)
+        game = cls(bot, channel, host, buy_in, hands)
         game.table.players.append(
             Player(host.id, host.display_name, buy_in)
         )
@@ -182,11 +198,17 @@ class PokerGame:
             f"`{index + 1}.` <@{player.user_id}> — {player.chips:,} chips"
             for index, player in enumerate(self.table.players)
         )
+        hands = (
+            "Unlimited"
+            if self.hands_limit is None
+            else hands_label(self.hands_limit)
+        )
         embed = discord.Embed(
             title="♠ Texas Hold'em — Lobby",
             description=(
                 f"**Host:** <@{self.host_id}>\n"
                 f"**Buy-in:** **{self.buy_in:,}** chips\n"
+                f"**Hands:** **{hands}**\n"
                 f"**Blinds:** {self.small_blind:,}/{self.big_blind:,}\n\n"
                 "Type `join game` in this channel or press **Join game**.\n"
                 "The host starts with `start game` or **Start game**."
@@ -269,6 +291,11 @@ class PokerGame:
             logger.exception("Could not record games started")
 
         if self.lobby_message is not None:
+            hands = (
+                "unlimited hands"
+                if self.hands_limit is None
+                else hands_label(self.hands_limit)
+            )
             with suppress(discord.HTTPException):
                 await self.lobby_message.edit(
                     embed=discord.Embed(
@@ -276,7 +303,8 @@ class PokerGame:
                         description=(
                             f"**{len(self.table.players)} players** · "
                             f"**{self.buy_in:,}** chip stacks · "
-                            f"blinds **{self.small_blind:,}/{self.big_blind:,}**\n\n"
+                            f"blinds **{self.small_blind:,}/{self.big_blind:,}** · "
+                            f"**{hands}**\n\n"
                             "Your hole cards are always shown privately in "
                             "this channel — press **View my cards** or use "
                             "`/cards`.\n\n"
@@ -311,12 +339,26 @@ class PokerGame:
         )
 
     # -------------------------------------------------------------- game loop
+    def _hand_limit_reached(self) -> bool:
+        return (
+            self.hands_limit is not None
+            and self.table.hand_number >= self.hands_limit
+        )
+
     async def _run(self) -> None:
         try:
             while self.state == "running":
                 if len(self.table.active_players()) < MIN_PLAYERS:
                     await self._settle(
                         "Only one player still has chips — the table is closing."
+                    )
+                    return
+
+                if self._hand_limit_reached():
+                    await self._settle(
+                        f"Hand limit reached "
+                        f"({hands_label(self.hands_limit)}) — "
+                        "the table is closing."
                     )
                     return
 
@@ -333,6 +375,14 @@ class PokerGame:
                 if len(self.table.active_players()) < MIN_PLAYERS:
                     await self._settle(
                         "Only one player still has chips — the table is closing."
+                    )
+                    return
+
+                if self._hand_limit_reached():
+                    await self._settle(
+                        f"Hand limit reached "
+                        f"({hands_label(self.hands_limit)}) — "
+                        "the table is closing."
                     )
                     return
 
@@ -656,8 +706,11 @@ class PokerGame:
     ) -> discord.Embed:
         hand = self.table.hand
         assert hand is not None
+        hand_label = f"Hand #{self.table.hand_number}"
+        if self.hands_limit is not None:
+            hand_label += f"/{self.hands_limit:,}"
         embed = discord.Embed(
-            title=f"♠ Texas Hold'em · Hand #{self.table.hand_number}",
+            title=f"♠ Texas Hold'em · {hand_label}",
             color=GOLD if result is not None else EMBED_COLOR,
         )
 

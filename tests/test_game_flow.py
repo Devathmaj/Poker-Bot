@@ -100,9 +100,9 @@ class GameFlowTests(unittest.IsolatedAsyncioTestCase):
             await game.end("test cleanup")
         await self.store.close()
 
-    async def _new_table(self) -> PokerGame:
+    async def _new_table(self, hands: int | None = None) -> PokerGame:
         game, error = await PokerGame.create(
-            self.bot, self.channel, self.host, 500
+            self.bot, self.channel, self.host, 500, hands
         )
         self.assertIsNone(error)
         self.assertIsNotNone(game)
@@ -218,6 +218,55 @@ class GameFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.store.balance(self.host.id), 1000)
         self.assertNotIn(self.channel.id, self.bot.games)
 
+    async def test_create_game_rejects_out_of_range_hand_limits(self) -> None:
+        for hands in (0, -1, 1001):
+            with self.subTest(hands=hands):
+                game, error = await PokerGame.create(
+                    self.bot, self.channel, self.host, 500, hands
+                )
+                self.assertIsNone(game)
+                self.assertIn("Hand limit must be between", error)
+        self.assertEqual(await self.store.balance(self.host.id), 1000)
+        self.assertNotIn(self.channel.id, self.bot.games)
+
+    async def test_hand_limit_closes_table_after_configured_hands(self) -> None:
+        with patch("pokerbot.game.SHOWDOWN_PAUSE", 0.01), patch(
+            "pokerbot.game.STREET_PAUSE", 0.01
+        ):
+            game = await self._new_table(hands=1)
+            self.assertEqual(game.hands_limit, 1)
+            users = {self.host.id: self.host, self.guest.id: self.guest}
+
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + 10
+            while loop.time() < deadline and game.state != "ended":
+                actor = await self._next_actor(game)
+                if actor is not None:
+                    ok, message = await game.submit_action(
+                        users[actor], "call"
+                    )
+                    self.assertTrue(ok, message)
+                await asyncio.sleep(0.01)
+
+            self.assertEqual(game.state, "ended")
+            self.assertEqual(game.table.hand_number, 1)
+            self.assertTrue(game._settled)
+            self.assertNotIn(self.channel.id, self.bot.games)
+
+            closed = [
+                message.kwargs["embed"].description
+                for message in self.channel.messages
+                if message.kwargs.get("embed") is not None
+                and getattr(message.kwargs["embed"], "title", "")
+                == "♠ Table closed"
+            ]
+            self.assertTrue(closed)
+            self.assertIn("Hand limit reached (1 hand)", closed[-1])
+
+        total = await self.store.balance(self.host.id) + await self.store.balance(
+            self.guest.id
+        )
+        self.assertEqual(total, 2000)
 
     async def test_timeout_that_cannot_fold_does_not_stall_the_hand(self) -> None:
         # A player who has nothing to call cannot fold in PokerKit. The bot

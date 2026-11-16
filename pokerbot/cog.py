@@ -16,9 +16,11 @@ from .config import (
     DAILY_CHIPS,
     DEFAULT_BUY_IN,
     MAX_BUY_IN,
+    MAX_HANDS,
     MIN_BUY_IN,
+    MIN_HANDS,
 )
-from .game import PokerGame
+from .game import PokerGame, hands_label
 from .hands import hand_rankings_embed
 from .visuals import render_help_chart
 
@@ -251,13 +253,22 @@ class PokerCog(commands.Cog):
             inline=False,
         )
         embed.add_field(
+            name="Game length",
+            value=(
+                "By default a table runs until only one player has chips left. "
+                "Pass `hands` to `/creategame` to stop after that many hands; "
+                "remaining stacks are cashed out when the limit is reached."
+            ),
+            inline=False,
+        )
+        embed.add_field(
             name="Commands",
             value=(
                 "`/daily` — claim chips\n"
                 "`/balance` — check your chip balance\n"
                 "`/profile [user]` — view your or another player's profile\n"
                 "`/hands` — see every hand ranked strongest to weakest\n"
-                "`/creategame [buy_in]` — open a table (host joins automatically)\n"
+                "`/creategame [buy_in] [hands]` — open a table (host joins automatically)\n"
                 "Type `join game` — take a seat in the lobby\n"
                 "Type `start game` — host starts the game\n"
                 "`/cards` — privately re-check your hole cards and best hand\n"
@@ -292,12 +303,17 @@ class PokerCog(commands.Cog):
         description="Open a Texas Hold'em table in this channel.",
     )
     @app_commands.describe(
-        buy_in=f"Chips each player brings (default {DEFAULT_BUY_IN:,})."
+        buy_in=f"Chips each player brings (default {DEFAULT_BUY_IN:,}).",
+        hands=(
+            "Stop after this many hands. Omit to play until one player "
+            "has chips left."
+        ),
     )
     async def creategame(
         self,
         interaction: discord.Interaction,
         buy_in: app_commands.Range[int, MIN_BUY_IN, MAX_BUY_IN] = DEFAULT_BUY_IN,
+        hands: app_commands.Range[int, MIN_HANDS, MAX_HANDS] | None = None,
     ) -> None:
         await interaction.response.defer()
         if interaction.guild is None or not isinstance(
@@ -309,15 +325,20 @@ class PokerCog(commands.Cog):
             return
 
         game, error = await PokerGame.create(
-            self.bot, interaction.channel, interaction.user, buy_in
+            self.bot, interaction.channel, interaction.user, buy_in, hands
         )
         if error:
             await interaction.followup.send(error)
             return
 
+        length = (
+            "**unlimited** hands"
+            if hands is None
+            else f"**{hands_label(hands)}**"
+        )
         await interaction.followup.send(
-            f"♠ Table created with a **{buy_in:,}** chip buy-in and blinds "
-            f"**{game.small_blind:,}/{game.big_blind:,}**.\n"
+            f"♠ Table created with a **{buy_in:,}** chip buy-in, blinds "
+            f"**{game.small_blind:,}/{game.big_blind:,}**, and {length}.\n"
             "Others can type `join game` or press **Join game**."
         )
 

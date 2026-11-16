@@ -21,6 +21,10 @@ MAX_PLAYERS = 8
 TURN_SECONDS = 60
 MAX_TIMEOUTS = 3
 
+# Optional per-game hand limit (None = play until one player is left).
+MIN_HANDS = 1
+MAX_HANDS = 1_000
+
 # Session pacing (seconds)
 SHOWDOWN_PAUSE = 8
 STREET_PAUSE = 1.2

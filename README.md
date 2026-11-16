@@ -10,7 +10,7 @@ A Python Discord bot for no-limit Texas Hold'em with persistent chip wallets, da
 - **`/daily`** — claim **1,000** chips every 24 hours.
 - **`/balance`** — check how many chips you have.
 - **`/hands`** — see every poker hand from royal flush down to high card, with examples, what each hand beats, tie/kicker rules, and the hand-ranking chart. Every game start posts an enlarged copy of the chart in the channel.
-- **`/creategame [buy_in]`** — opens a table in the channel and joins the host automatically. The buy-in (default **500**) becomes the host's starting stack.
+- **`/creategame [buy_in] [hands]`** — opens a table in the channel and joins the host automatically. The buy-in (default **500**) becomes the host's starting stack. Set `hands` to close the table after that many hands (default is unlimited).
 - **`join game`** — typed in the channel, or use the **Join game** button. Does nothing if no table exists.
 - **`start game`** — the host starts the game by typing this or pressing **Start game**.
 - **Full no-limit Hold'em** — blinds, four betting rounds, all-ins, side pots, split pots, min-raise rules, and showdowns are handled by [PokerKit](https://github.com/uoftcprg/pokerkit).
@@ -78,7 +78,7 @@ Requires **Python 3.11+** and a **PostgreSQL** database.
 | `/hands` | everyone | Lists every hand from strongest to weakest with example cards, what each hand beats, and the hand-ranking chart. Every game start posts an enlarged copy of the chart. |
 | `/profile [user]` | everyone | Shows your profile, or another member's, including avatar, username, wallet, daily status/cooldown, and poker stats (games, hands, hand wins/rate, biggest pot, net chips). Public message. |
 | `/help` | everyone | Rules, command list, and a generated hand-ranking chart. |
-| `/creategame [buy_in]` | everyone | Opens a table. Buy-in range is 100–100,000; default 500. One table per channel. |
+| `/creategame [buy_in] [hands]` | everyone | Opens a table. Buy-in range is 100–100,000; default 500. `hands` (1–1,000) closes the table after that many hands; omit it to play until one player is left. One table per channel. |
 | `join game` (typed) | everyone | Joins the lobby. Requires enough chips; the buy-in is deducted. |
 | `start game` (typed) | host | Starts the game. Also available as the **Start game** button. |
 | `check` / `call` / `fold` (typed) | player whose turn it is | Acts in the hand. The whole message must match, ignoring case and surrounding spaces. |
@@ -95,7 +95,7 @@ Requires **Python 3.11+** and a **PostgreSQL** database.
 - Two hole cards each; five community cards are dealt as the flop (3), turn (1), and river (1).
 - Betting rounds: pre-flop, flop, turn, river. No-limit; a raise must be at least the big blind or the previous raise.
 - All-in bets and side pots are resolved automatically.
-- Hands continue until one player has chips left or the host/admin runs `/endgame`. Busting a buy-in means the chips are lost; cashing out returns your remaining stack to your wallet.
+- Hands continue until one player has chips left, a set `hands` limit is reached, or the host/admin runs `/endgame`. Busting a buy-in means the chips are lost; cashing out returns your remaining stack to your wallet.
 - The buy-in is taken when you join, and remaining chips are credited back when the table closes. If the bot is shut down gracefully, active tables are cashed out.
 
 ### Timeouts
