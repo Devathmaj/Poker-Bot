@@ -22,6 +22,7 @@ A Python Discord bot for no-limit Texas Hold'em with persistent chip wallets, da
 - **`/endgame`** — the host or a server admin closes the table immediately. Remaining stacks are cashed back into wallets.
 - **Chip wallet** — balances are stored in PostgreSQL via `DATABASE_URL` and survive bot restarts.
 - **Crypto RNG** — the deck is shuffled with `secrets.SystemRandom`, and PokerKit draws from that single shuffled deck (so burn cards never duplicate dealt cards).
+- **Bot profile** — the bot shows `Dealing cards | /help` as its status, and its slash commands are registered globally so Discord lists them in the profile's **Commands** tab.
 
 ![Table](docs/preview-table.png)
 
@@ -52,7 +53,7 @@ Requires **Python 3.11+** and a **PostgreSQL** database.
    # edit .env and set DISCORD_TOKEN=... and DATABASE_URL=postgresql://...
    ```
 
-   `DATABASE_URL` is required. The bot creates its `users` table automatically on startup. For instant slash-command updates while developing, set `GUILD_ID` in `.env` to your server ID. Otherwise commands sync globally (Discord can take a while to show them).
+   `DATABASE_URL` is required. The bot creates its `users` table automatically on startup. Slash commands are synced globally, which is what makes Discord list them in the bot's profile under **Commands** (Discord can take a while to show global updates). For instant command updates while developing, set `GUILD_ID` in `.env` to your server ID; the bot then also registers a copy of the commands in that server. Global syncs are only sent when the command set changes, because Discord rate limits them.
 
 4. Run the bot from the project root:
 

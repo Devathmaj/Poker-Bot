@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
 import time
 from contextlib import suppress
@@ -13,7 +15,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from .cog import PokerCog
-from .config import DATABASE_URL, GUILD_ID
+from .config import DATA_DIR, DATABASE_URL, GUILD_ID
 from .store import ChipStore
 
 if TYPE_CHECKING:
@@ -23,6 +25,13 @@ logger = logging.getLogger(__name__)
 
 # Refresh a player's stored name at most once an hour per process.
 _TRACK_REFRESH_SECONDS = 3600
+
+# Shown in the member list while the bot is connected.
+PRESENCE_TEXT = "Dealing cards | /help"
+
+# Discord limits global command overwrites to a couple of requests per day, so
+# the command payload is fingerprinted and only pushed when it actually changed.
+_COMMAND_STAMP = DATA_DIR / "command_sync.json"
 
 
 class PokerBot(commands.Bot):
@@ -113,30 +122,97 @@ class PokerBot(commands.Bot):
         except discord.HTTPException:
             logger.debug("Could not deliver the error response", exc_info=True)
 
-    async def setup_hook(self) -> None:
-        await self.add_cog(PokerCog(self))
+    # ---------------------------------------------------------------- commands
+    def _command_fingerprint(self) -> str:
+        """Hash the current slash-command payload."""
+        payload = [
+            command.to_dict(self.tree) for command in self.tree.get_commands()
+        ]
+        raw = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+    def _last_command_fingerprint(self) -> str | None:
         try:
-            if GUILD_ID:
-                try:
-                    guild = discord.Object(id=int(GUILD_ID))
-                except ValueError:
-                    logger.warning("GUILD_ID is not a number; syncing globally")
-                    await self.tree.sync()
-                else:
-                    self.tree.copy_global_to(guild=guild)
-                    await self.tree.sync(guild=guild)
-                    logger.info("Slash commands synced to guild %s", GUILD_ID)
-            else:
+            data = json.loads(_COMMAND_STAMP.read_text(encoding="utf-8"))
+            return data["fingerprint"]
+        except (OSError, ValueError, KeyError, TypeError):
+            return None
+
+    def _remember_command_fingerprint(self, fingerprint: str) -> None:
+        try:
+            _COMMAND_STAMP.parent.mkdir(parents=True, exist_ok=True)
+            _COMMAND_STAMP.write_text(
+                json.dumps({"fingerprint": fingerprint}), encoding="utf-8"
+            )
+        except OSError:
+            logger.debug(
+                "Could not store the command sync fingerprint", exc_info=True
+            )
+
+    async def _global_commands_match(self) -> bool:
+        """Check that Discord still lists the commands we have locally."""
+        try:
+            registered = {command.name for command in await self.tree.fetch_commands()}
+        except discord.HTTPException:
+            # Without an answer, assume a sync is needed.
+            return False
+        return registered == {command.name for command in self.tree.get_commands()}
+
+    async def _sync_commands(self) -> None:
+        """Publish slash commands globally and, optionally, to one guild.
+
+        Commands are registered globally so Discord lists them in the bot's
+        profile under "Commands". Because global syncs are rate limited, they
+        are skipped when the payload is unchanged. A guild copy is still
+        registered when GUILD_ID is set, so updates show up instantly while
+        developing.
+        """
+        fingerprint = self._command_fingerprint()
+        up_to_date = fingerprint == self._last_command_fingerprint()
+        if up_to_date and await self._global_commands_match():
+            logger.info("Global slash commands already up to date")
+        else:
+            try:
                 await self.tree.sync()
+            except discord.HTTPException:
+                logger.exception("Could not sync global slash commands")
+            else:
+                self._remember_command_fingerprint(fingerprint)
                 logger.info("Global slash commands synced")
+
+        if not GUILD_ID:
+            return
+        try:
+            guild = discord.Object(id=int(GUILD_ID))
+        except ValueError:
+            logger.warning("GUILD_ID is not a number; skipping the guild sync")
+            return
+
+        self.tree.copy_global_to(guild=guild)
+        try:
+            await self.tree.sync(guild=guild)
+            logger.info("Slash commands synced to guild %s", GUILD_ID)
         except discord.HTTPException:
             # A failed sync should not take the whole bot offline; the
             # previously registered commands keep working.
-            logger.exception("Could not sync slash commands")
+            logger.exception("Could not sync slash commands to guild %s", GUILD_ID)
+
+    async def setup_hook(self) -> None:
+        await self.add_cog(PokerCog(self))
+        await self._sync_commands()
 
     async def on_ready(self) -> None:
         user = self.user
         logger.info("Logged in as %s (%s)", user, getattr(user, "id", "?"))
+
+        # Re-sent on every connect so reconnects keep the status.
+        try:
+            await self.change_presence(
+                activity=discord.CustomActivity(name=PRESENCE_TEXT),
+                status=discord.Status.online,
+            )
+        except discord.HTTPException:
+            logger.exception("Could not update the bot's status")
 
         # Reconcile the server list every time we connect, so joins and kicks
         # that happened while the bot was offline are still recorded.
