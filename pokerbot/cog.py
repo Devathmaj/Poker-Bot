@@ -19,6 +19,7 @@ from .config import (
     MIN_BUY_IN,
 )
 from .game import PokerGame
+from .hands import hand_rankings_embed
 from .visuals import render_help_chart
 
 if TYPE_CHECKING:
@@ -127,6 +128,20 @@ class PokerCog(commands.Cog):
             color=GOLD,
         )
         await interaction.followup.send(embed=embed)
+
+    @app_commands.command(
+        name="hands",
+        description="Show every poker hand, strongest to weakest.",
+    )
+    async def hands(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer()
+        embed = hand_rankings_embed()
+        embed.set_image(url="attachment://hand-rankings.png")
+        image = await asyncio.to_thread(render_help_chart)
+        await interaction.followup.send(
+            embed=embed,
+            file=discord.File(BytesIO(image), filename="hand-rankings.png"),
+        )
 
     # ----------------------------------------------------------------- profile
     @app_commands.command(
@@ -241,6 +256,7 @@ class PokerCog(commands.Cog):
                 "`/daily` — claim chips\n"
                 "`/balance` — check your chip balance\n"
                 "`/profile [user]` — view your or another player's profile\n"
+                "`/hands` — see every hand ranked strongest to weakest\n"
                 "`/creategame [buy_in]` — open a table (host joins automatically)\n"
                 "Type `join game` — take a seat in the lobby\n"
                 "Type `start game` — host starts the game\n"
@@ -415,8 +431,13 @@ class PokerCog(commands.Cog):
         else:
             _ok, response = await game.start(message.author)
 
-        await message.reply(
-            response,
-            mention_author=False,
-            allowed_mentions=discord.AllowedMentions(users=True),
-        )
+        try:
+            await message.reply(
+                response,
+                mention_author=False,
+                allowed_mentions=discord.AllowedMentions(users=True),
+            )
+        finally:
+            if _ok and text == "start game":
+                # Keep the chart directly under the start confirmation.
+                await game.launch()

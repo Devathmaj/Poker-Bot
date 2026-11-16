@@ -25,7 +25,13 @@ from .config import (
 from .engine import Hand, HandResult, IllegalAction, Player, Table
 from .store import HandStat
 from .ui import ActionView, CardsView, LobbyView
-from .visuals import PlayerVisual, TableVisual, render_hole_cards, render_table
+from .visuals import (
+    PlayerVisual,
+    TableVisual,
+    render_help_chart,
+    render_hole_cards,
+    render_table,
+)
 
 if TYPE_CHECKING:
     from .bot import PokerBot
@@ -225,6 +231,11 @@ class PokerGame:
         )
 
     async def start(self, user: discord.abc.User) -> tuple[bool, str]:
+        """Validate the start request and announce the table.
+
+        The caller sends the returned message, then calls :meth:`launch` so the
+        hand reference lands directly underneath it before the first hand.
+        """
         if user.id != self.host_id:
             return False, "Only the host can start this game."
         if self.state != "lobby":
@@ -259,10 +270,28 @@ class PokerGame:
                     ),
                     view=None,
                 )
+        return True, "▶️ Game started. Good luck!"
+
+    async def post_hand_chart(self) -> None:
+        """Post just the enlarged chart below the game-start message."""
+        try:
+            image = await asyncio.to_thread(render_help_chart, 2)
+            await self.channel.send(
+                file=discord.File(
+                    BytesIO(image), filename="hand-rankings.png"
+                )
+            )
+        except discord.HTTPException:
+            logger.warning(
+                "Could not post the hand chart in %s", self.channel.id
+            )
+
+    async def launch(self) -> None:
+        """Post the enlarged hand chart, then deal the first hand."""
+        await self.post_hand_chart()
         self.task = asyncio.create_task(
             self._run(), name=f"poker-game-{self.channel.id}"
         )
-        return True, "▶️ Game started. Good luck!"
 
     # -------------------------------------------------------------- game loop
     async def _run(self) -> None:

@@ -110,6 +110,7 @@ class GameFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(ok, message)
         ok, message = await game.start(self.host)
         self.assertTrue(ok, message)
+        await game.launch()
         return game
 
     async def _next_actor(self, game: PokerGame, timeout: float = 5.0) -> int | None:
@@ -122,6 +123,19 @@ class GameFlowTests(unittest.IsolatedAsyncioTestCase):
                 return game.pending.user_id
             await asyncio.sleep(0.01)
         raise AssertionError("the game did not ask anybody to act")
+
+    async def test_start_posts_hand_chart_before_first_hand(self) -> None:
+        game = await self._new_table()
+
+        self.assertEqual(game.state, "running")
+        self.assertIsNotNone(game.task)
+        # The lobby is message 0; the chart must be posted before the table
+        # render so it sits directly under the game-start message.
+        message = self.channel.messages[1]
+        self.assertIsNone(message.kwargs.get("embed"))
+        attachment = message.kwargs.get("file")
+        self.assertIsNotNone(attachment)
+        self.assertEqual(attachment.filename, "hand-rankings.png")
 
     async def test_check_call_hand_completes_and_chips_cash_out(self) -> None:
         with patch("pokerbot.game.SHOWDOWN_PAUSE", 0.01), patch(

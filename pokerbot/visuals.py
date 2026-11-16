@@ -518,76 +518,110 @@ HELP_RANKINGS: tuple[RankingRow, ...] = (
 )
 
 
-@lru_cache(maxsize=1)
-def render_help_chart() -> bytes:
-    width, height = 1000, 1270
+@lru_cache(maxsize=2)
+def render_help_chart(scale: int = 1) -> bytes:
+    """Render the hand-ranking chart. ``scale`` enlarges it for game starts."""
+    width, height = 1000 * scale, 1270 * scale
     image = _background(width, height)
     draw = ImageDraw.Draw(image)
 
-    draw.text((54, 44), "♠", font=_font(34, True), fill=GOLD)
-    draw.text((94, 49), "POKER HAND RANKINGS", font=_font(30, True), fill=CREAM)
     draw.text(
-        (96, 87),
+        (54 * scale, 44 * scale), "♠", font=_font(34 * scale, True), fill=GOLD
+    )
+    draw.text(
+        (94 * scale, 49 * scale),
+        "POKER HAND RANKINGS",
+        font=_font(30 * scale, True),
+        fill=CREAM,
+    )
+    draw.text(
+        (96 * scale, 87 * scale),
         "Texas Hold'em · your best five cards from two hole cards and five community cards",
-        font=_font(14, False),
+        font=_font(14 * scale, False),
         fill=MUTED,
     )
-    draw.line((54, 120, width - 54, 120), fill=(45, 82, 68), width=1)
+    draw.line(
+        (54 * scale, 120 * scale, width - 54 * scale, 120 * scale),
+        fill=(45, 82, 68),
+        width=max(1, scale),
+    )
 
-    row_height = 104
-    top = 142
-    card_w, card_h, card_gap = 54, 79, 6
+    row_height = 104 * scale
+    top = 142 * scale
+    card_w, card_h, card_gap = 54 * scale, 79 * scale, 6 * scale
     for index, row in enumerate(HELP_RANKINGS):
         y = top + index * row_height
         if index % 2 == 0:
             draw.rounded_rectangle(
-                (42, y - 6, width - 42, y + row_height - 14),
-                radius=12,
+                (
+                    42 * scale,
+                    y - 6 * scale,
+                    width - 42 * scale,
+                    y + row_height - 14 * scale,
+                ),
+                radius=12 * scale,
                 fill=(17, 43, 35),
             )
 
         rank_text = str(index + 1)
-        center_x = 78
-        center_y = y + 32
+        center_x = 78 * scale
+        center_y = y + 32 * scale
         if index == 0:
             draw.ellipse(
-                (center_x - 20, center_y - 20, center_x + 20, center_y + 20),
+                (
+                    center_x - 20 * scale,
+                    center_y - 20 * scale,
+                    center_x + 20 * scale,
+                    center_y + 20 * scale,
+                ),
                 fill=(GOLD[0], GOLD[1], GOLD[2], 235),
             )
             draw.text(
-                (center_x - 7, center_y - 13),
+                (center_x - 7 * scale, center_y - 13 * scale),
                 rank_text,
-                font=_font(19, True),
+                font=_font(19 * scale, True),
                 fill=(24, 24, 18),
             )
         else:
             draw.ellipse(
-                (center_x - 19, center_y - 19, center_x + 19, center_y + 19),
+                (
+                    center_x - 19 * scale,
+                    center_y - 19 * scale,
+                    center_x + 19 * scale,
+                    center_y + 19 * scale,
+                ),
                 outline=(74, 112, 96),
-                width=1,
+                width=max(1, scale),
             )
             draw.text(
-                (center_x - 7, center_y - 13),
+                (center_x - 7 * scale, center_y - 13 * scale),
                 rank_text,
-                font=_font(19, True),
+                font=_font(19 * scale, True),
                 fill=MUTED,
             )
 
-        draw.text((120, y + 14), row.name, font=_font(22, True), fill=CREAM)
         draw.text(
-            (120, y + 44),
+            (120 * scale, y + 14 * scale),
+            row.name,
+            font=_font(22 * scale, True),
+            fill=CREAM,
+        )
+        draw.text(
+            (120 * scale, y + 44 * scale),
             row.description,
-            font=_font(13, False),
+            font=_font(13 * scale, False),
             fill=MUTED,
         )
 
-        x = width - 54 - (len(row.cards) * card_w + (len(row.cards) - 1) * card_gap)
+        x = width - 54 * scale - (
+            len(row.cards) * card_w + (len(row.cards) - 1) * card_gap
+        )
         for card in row.cards:
             _paste_card(
                 image,
                 card,
                 x,
-                y + 2,
+                y + 2 * scale,
                 card_w,
                 card_h,
                 shadow=False,
@@ -595,16 +629,21 @@ def render_help_chart() -> bytes:
             x += card_w + card_gap
 
         draw.line(
-            (54, y + row_height - 12, width - 54, y + row_height - 12),
+            (
+                54 * scale,
+                y + row_height - 12 * scale,
+                width - 54 * scale,
+                y + row_height - 12 * scale,
+            ),
             fill=(32, 62, 51),
-            width=1,
+            width=max(1, scale),
         )
 
     footer = "Community cards are shared by everyone. Betting rounds: pre-flop, flop, turn, river."
-    footer_font = _font(13, False)
+    footer_font = _font(13 * scale, False)
     footer_w = _text_width(draw, footer, footer_font)
     draw.text(
-        ((width - footer_w) // 2, height - 48),
+        ((width - footer_w) // 2, height - 48 * scale),
         footer,
         font=footer_font,
         fill=(150, 170, 160),

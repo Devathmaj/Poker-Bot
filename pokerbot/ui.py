@@ -92,7 +92,12 @@ class LobbyView(PokerView):
             return
         await interaction.response.defer()
         _ok, message = await self.game.start(interaction.user)
-        await interaction.followup.send(message)
+        try:
+            await interaction.followup.send(message)
+        finally:
+            if _ok:
+                # Keep the chart directly under the start confirmation.
+                await self.game.launch()
 
 
 class CardsView(PokerView):
