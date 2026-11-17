@@ -122,16 +122,30 @@ class PokerCog(commands.Cog):
 
     @app_commands.command(
         name="balance",
-        description="Check how many chips you have.",
+        description="Check how many chips you have, or another player's.",
     )
-    async def balance(self, interaction: discord.Interaction) -> None:
+    @app_commands.describe(user="Check another player's balance (optional).")
+    async def balance(
+        self,
+        interaction: discord.Interaction,
+        user: discord.User | None = None,
+    ) -> None:
+        target = user or interaction.user
         await interaction.response.defer()
-        balance = await self.bot.store.balance(interaction.user.id)
-        embed = discord.Embed(
-            title="💰 Your balance",
-            description=f"You have **{balance:,}** chips.",
-            color=GOLD,
-        )
+        balance = await self.bot.store.balance(target.id)
+        if target.id == interaction.user.id:
+            embed = discord.Embed(
+                title="💰 Your balance",
+                description=f"You have **{balance:,}** chips.",
+                color=GOLD,
+            )
+        else:
+            embed = discord.Embed(
+                title=f"💰 {target.display_name}'s balance",
+                description=f"`{target}` has **{balance:,}** chips.",
+                color=GOLD,
+            )
+            embed.set_thumbnail(url=target.display_avatar.url)
         await interaction.followup.send(embed=embed)
 
     @app_commands.command(
@@ -268,7 +282,7 @@ class PokerCog(commands.Cog):
             name="Commands",
             value=(
                 "`/daily` — claim chips\n"
-                "`/balance` — check your chip balance\n"
+                "`/balance [user]` — check your or another player's chip balance\n"
                 "`/profile [user]` — view your or another player's profile\n"
                 "`/hands` — see every hand ranked strongest to weakest\n"
                 "`/creategame [buy_in] [hands]` — open a table (host joins automatically)\n"
