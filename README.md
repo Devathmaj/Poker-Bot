@@ -10,6 +10,8 @@ A Python Discord bot for no-limit Texas Hold'em with persistent chip wallets, da
 - **`/daily`** — claim **1,000** chips every 24 hours.
 - **`/balance [user]`** — check how many chips you have, or another player's.
 - **`/hands`** — see every poker hand from royal flush down to high card, with examples, what each hand beats, tie/kicker rules, and the hand-ranking chart. Every game start posts an enlarged copy of the chart in the channel.
+- **`/howtoplay`** — a beginner-friendly guide to Texas Hold'em: the objective, the deal and betting rounds, what check/call/raise/all-in/fold do, blinds and the dealer button, pots and side pots, and how to win. Includes the hand-ranking chart and points to `/hands` for full hand details.
+- **`/help`** — bot help: quick-start steps, the full command list, chip handling, in-hand controls, and the turn timer.
 - **`/creategame [buy_in] [hands]`** — opens a table in the channel and joins the host automatically. The buy-in (default **500**) becomes the host's starting stack. Set `hands` to close the table after that many hands (default is unlimited).
 - **`join game`** — typed in the channel, or use the **Join game** button. Does nothing if no table exists.
 - **`start game`** — the host starts the game by typing this or pressing **Start game**.
@@ -79,7 +81,8 @@ Requires **Python 3.11+** and a **PostgreSQL** database.
 | `/balance [user]` | everyone | Shows your chip balance, or another member's. |
 | `/hands` | everyone | Lists every hand from strongest to weakest with example cards, what each hand beats, and the hand-ranking chart. Every game start posts an enlarged copy of the chart. |
 | `/profile [user]` | everyone | Shows your profile, or another member's, including avatar, username, wallet, daily status/cooldown, and poker stats (games, hands, hand wins/rate, biggest pot, net chips). Public message. |
-| `/help` | everyone | Rules, command list, and a generated hand-ranking chart. |
+| `/help` | everyone | Bot help: quick start, command list, chips, in-hand controls, and the turn timer. |
+| `/howtoplay` | everyone | Poker guide: objective, deal and betting rounds, check/call/raise/all-in/fold, blinds, pots, and showdown. Includes the hand-ranking chart and points to `/hands` for detail. |
 | `/creategame [buy_in] [hands]` | everyone | Opens a table. Buy-in range is 100–100,000; default 500. `hands` (1–1,000) closes the table after that many hands; omit it to play until one player is left. One table per channel. |
 | `join game` (typed) | everyone | Joins the lobby. Requires enough chips; the buy-in is deducted. |
 | `start game` (typed) | host | Starts the game. Also available as the **Start game** button. |
@@ -92,6 +95,8 @@ Requires **Python 3.11+** and a **PostgreSQL** database.
 | `/endgame` | host or admin | Immediately closes the table and cashes out remaining stacks. |
 
 ## Rules in brief
+
+For a beginner-friendly walkthrough, use `/howtoplay`. For every hand ranked strongest to weakest, use `/hands`.
 
 - Each player starts with a stack equal to the buy-in. Blinds scale with the buy-in: `small = buy_in / 50`, `big = 2 × small` (500 → 10/20).
 - Two hole cards each; five community cards are dealt as the flop (3), turn (1), and river (1).
@@ -110,7 +115,7 @@ Every turn has a **60-second** limit. If you do not act:
 
 ## Help artwork
 
-`/help` includes this generated chart:
+`/howtoplay` includes this generated chart (and `/hands` shows it alongside the full hand detail):
 
 ![Hand rankings](docs/preview-help.png)
 
@@ -152,7 +157,7 @@ SELECT * FROM guild_events   ORDER BY occurred_at;
 ```
 pokerbot/
   bot.py        Discord client, setup hook, graceful shutdown cash-out
-  cog.py        /daily, /balance, /hands, /profile, /help, /creategame, /endgame, /cards
+  cog.py        /daily, /balance, /hands, /profile, /help, /howtoplay, /creategame, /endgame, /cards
   game.py       table orchestration, timers, timeouts, embeds, cashier
   engine.py     poker rules wrapper, seating/blinds rotation, CSPRNG-shuffled deck
   hands.py      hand-ranking embed used by /hands

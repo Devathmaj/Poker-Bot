@@ -18,8 +18,10 @@ from .config import (
     DEFAULT_BUY_IN,
     MAX_BUY_IN,
     MAX_HANDS,
+    MAX_TIMEOUTS,
     MIN_BUY_IN,
     MIN_HANDS,
+    TURN_SECONDS,
 )
 from .game import PokerGame, hands_label
 from .hands import hand_rankings_embed
@@ -226,88 +228,188 @@ class PokerCog(commands.Cog):
     # ------------------------------------------------------------------- help
     @app_commands.command(
         name="help",
-        description="Texas Hold'em rules, commands, and a hand-ranking chart.",
+        description="Bot commands, getting started, chips, and the turn timer.",
     )
     async def help(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer()
         embed = discord.Embed(
-            title="♠ Texas Hold'em — Rules & Commands",
+            title="♠ Poker Bot — Help",
             description=(
-                "**Goal:** Make the best five-card hand from your two private "
-                "hole cards and the five shared community cards."
+                "Start a table, manage your chips, and take a seat. "
+                "New to Texas Hold'em? Use `/howtoplay` for the rules and "
+                "`/hands` for every hand ranking."
             ),
             color=EMBED_COLOR,
         )
         embed.add_field(
-            name="The hand",
+            name="Quick start",
             value=(
-                "Everyone gets two hole cards. The dealer reveals the flop "
-                "(3 cards), turn (1), then river (1). There are four betting "
-                "rounds: pre-flop, flop, turn, river."
+                "`1.` `/daily` — claim chips for your wallet\n"
+                "`2.` `/creategame` — open a table (you join automatically)\n"
+                "`3.` `join game` — other players take a seat\n"
+                "`4.` `start game` — the host deals the first hand"
             ),
             inline=False,
         )
         embed.add_field(
-            name="Betting",
+            name="Chips & profile",
             value=(
-                "No-limit. On your turn you can **Fold**, **Check/Call**, "
-                "**Raise**, or go **All-in**. A raise must be at least the big "
-                "blind (or the size of the previous raise). Side pots and "
-                "all-ins are handled automatically."
+                f"`/daily` — claim **{DAILY_CHIPS:,}** chips every 24 hours\n"
+                "`/balance [user]` — check your or another player's wallet\n"
+                "`/profile [user]` — view your wallet and poker stats\n"
+                "Buy-ins come out of your wallet, and your remaining stack is "
+                "paid back when the table closes."
             ),
             inline=False,
         )
         embed.add_field(
-            name="Chips",
+            name="Table commands",
             value=(
-                f"Use `/daily` every 24 hours for **{DAILY_CHIPS:,}** chips. "
-                f"Check your wallet any time with `/balance`. "
-                f"`/creategame [buy_in]` opens a table and takes the buy-in "
-                f"(default {DEFAULT_BUY_IN:,}). Buy-in chips become your stack; "
-                "at the end of the game your remaining stack is paid back to "
-                "your wallet. Win a pot and keep the chips."
+                "`/creategame [buy_in] [hands]` — open a table in this channel\n"
+                f"Buy-in defaults to **{DEFAULT_BUY_IN:,}**. Omit `hands` to "
+                "play until one player has chips left, or set a hand limit.\n"
+                "`join game` — take a seat in the lobby\n"
+                "`start game` — the host starts the game (needs 2+ players)\n"
+                "`/endgame` — host or server admin closes the table and cashes out"
             ),
             inline=False,
         )
         embed.add_field(
-            name="Game length",
+            name="During a hand",
             value=(
-                "By default a table runs until only one player has chips left. "
-                "Pass `hands` to `/creategame` to stop after that many hands; "
-                "remaining stacks are cashed out when the limit is reached."
-            ),
-            inline=False,
-        )
-        embed.add_field(
-            name="Commands",
-            value=(
-                "`/daily` — claim chips\n"
-                "`/balance [user]` — check your or another player's chip balance\n"
-                "`/profile [user]` — view your or another player's profile\n"
-                "`/hands` — see every hand ranked strongest to weakest\n"
-                "`/creategame [buy_in] [hands]` — open a table (host joins automatically)\n"
-                "Type `join game` — take a seat in the lobby\n"
-                "Type `start game` — host starts the game\n"
-                "`/cards` — privately re-check your hole cards and best hand\n"
-                "`/endgame` — host or server admin closes the table and cashes out\n"
-                "During a hand, type exactly one of: `check`, `call`, "
-                "`raise <amount>`, `all in`, or `fold`.\n"
-                "The **Fold / Check / Call / Raise / All-in** buttons also work.\n"
-                "Only dealt hole cards are private; everything else is public."
+                "`/cards` — privately view your hole cards and current best hand\n"
+                "Type `check`, `call`, `raise <amount>`, `all in`, or `fold` "
+                "— the whole message must match\n"
+                "The **Fold**, **Check/Call**, **Raise**, and **All-in** "
+                "buttons do the same\n"
+                "The **View my cards** button is also on the table\n"
+                "Only your hole cards are private; everything else is public."
             ),
             inline=False,
         )
         embed.add_field(
             name="Turn timer",
             value=(
-                "You have **60 seconds** to act. If you miss it, you are "
-                "auto-folded. After more than **3 timeouts** you are removed "
-                "from the table and your remaining chips are forfeited to the pot."
+                f"Each turn lasts **{TURN_SECONDS} seconds**. If you miss it, "
+                "you auto-check when checking is free, otherwise you "
+                f"auto-fold. After more than **{MAX_TIMEOUTS} timeouts** you "
+                "are removed from the table and your remaining chips are "
+                "forfeited to the pot."
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Learn the game",
+            value=(
+                "`/howtoplay` — the objective, betting actions, streets, and "
+                "showdown rules\n"
+                "`/hands` — every poker hand ranked strongest to weakest"
+            ),
+            inline=False,
+        )
+        embed.set_footer(
+            text="Use /howtoplay to learn poker · /hands for hand rankings"
+        )
+        await interaction.followup.send(embed=embed)
+
+    @app_commands.command(
+        name="howtoplay",
+        description=(
+            "Learn Texas Hold'em: goal, actions, betting rounds, and showdown."
+        ),
+    )
+    async def howtoplay(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer()
+        embed = discord.Embed(
+            title="♠ How to play Texas Hold'em",
+            description=(
+                "**Goal:** win chips by taking the pot. You either make the "
+                "best five-card hand at showdown, or everyone else folds and "
+                "you win without showing your cards."
+            ),
+            color=EMBED_COLOR,
+        )
+        embed.add_field(
+            name="The deal",
+            value=(
+                "Everyone gets **two private hole cards**. Five **community "
+                "cards** are dealt face up in the middle and shared by every "
+                "player.\n"
+                "• **Pre-flop** — 2 hole cards, first betting round\n"
+                "• **Flop** — 3 community cards, betting round\n"
+                "• **Turn** — 1 more community card, betting round\n"
+                "• **River** — the last community card, final betting round\n"
+                "• **Showdown** — remaining players reveal; the best hand wins"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Your actions",
+            value=(
+                "**Check** — pass the action when there is no bet to you.\n"
+                "**Call** — match the current bet to stay in the hand.\n"
+                "**Raise** — increase the bet. A raise must be at least the "
+                "big blind or the size of the previous raise. Enter the total "
+                "amount you want your bet to reach.\n"
+                "**All-in** — put every remaining chip in the pot. You cannot "
+                "be forced to add more, and side pots are handled for you.\n"
+                "**Fold** — give up the hand and any chips you already put in "
+                "the pot."
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Blinds and the button",
+            value=(
+                "Before cards are dealt, the two players left of the **dealer "
+                "button** post forced bets: the **small blind** and the **big "
+                "blind**. The button moves one seat each hand.\n"
+                "Blinds scale with the buy-in: **buy-in ÷ 50** is the small "
+                "blind, and **2×** that is the big blind.\n"
+                "The first player left of the big blind acts first before the "
+                "flop. After the flop, the first active player left of the "
+                "button acts first."
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="The pot",
+            value=(
+                "All bets go into the middle. If players go all-in for "
+                "different amounts, **side pots** are created: each pot is won "
+                "by the best hand among the players who contributed to it. "
+                "Ties split the pot, and an uncalled bet is returned.\n"
+                "Chips you win stay in your stack; when the table closes, "
+                "your remaining stack returns to your wallet."
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Winning the hand",
+            value=(
+                "At showdown, make the best **five cards** from any "
+                "combination of your two hole cards and the five community "
+                "cards. You can use both, one, or none of your hole cards. "
+                "Suits never break ties. If all five cards are equal, the pot "
+                "is split.\n"
+                "You can also win before showdown if every other player folds."
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Hand rankings",
+            value=(
+                "See **`/hands`** for the detailed rankings: every hand from "
+                "strongest to weakest, with examples and tie-break rules.\n"
+                "The chart below is a quick visual reference for the order of "
+                "hands."
             ),
             inline=False,
         )
         embed.set_image(url="attachment://hand-rankings.png")
-        embed.set_footer(text="Hand rankings are also shown below the commands.")
+        embed.set_footer(
+            text="Use /hands for detailed hand rankings · /help for bot commands"
+        )
         image = await asyncio.to_thread(render_help_chart)
         await interaction.followup.send(
             embed=embed,
