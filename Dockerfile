@@ -24,6 +24,9 @@ RUN useradd --create-home --uid 10001 pokerbot \
 
 USER pokerbot
 
+# Default health endpoint port (a hosting platform's PORT overrides it).
+EXPOSE 8080
+
 # discord.py turns SIGTERM into a graceful shutdown, which cashes out any
 # tables that are still open.
 STOPSIGNAL SIGTERM

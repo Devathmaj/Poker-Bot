@@ -36,6 +36,26 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 # Discord
 GUILD_ID = os.getenv("GUILD_ID")
 
+# Health endpoint polled by uptime monitors and container checks. Hosting
+# platforms inject PORT and route traffic to it, so PORT wins when present;
+# HEALTH_PORT is the local fallback. Port 0 would bind an ephemeral port that
+# no poller can guess, so it is rejected in favour of the default.
+HEALTH_HOST = os.getenv("HEALTH_HOST", "0.0.0.0")
+
+
+def _port_env(name: str, default: int) -> int:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        port = int(raw)
+    except ValueError:
+        return default
+    return port if 1 <= port <= 65535 else default
+
+
+HEALTH_PORT = _port_env("PORT", _port_env("HEALTH_PORT", 8080))
+
 
 def blinds_for_buy_in(buy_in: int) -> tuple[int, int]:
     """Return small/big blind for a buy-in (500 -> 10/20)."""

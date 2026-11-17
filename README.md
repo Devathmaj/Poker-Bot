@@ -25,6 +25,7 @@ A Python Discord bot for no-limit Texas Hold'em with persistent chip wallets, da
 - **`/endgame`** — the host or a server admin closes the table immediately. Remaining stacks are cashed back into wallets.
 - **Chip wallet** — balances are stored in PostgreSQL via `DATABASE_URL` and survive bot restarts.
 - **Crypto RNG** — the deck is shuffled with `secrets.SystemRandom`, and PokerKit draws from that single shuffled deck (so burn cards never duplicate dealt cards).
+- **Health endpoint** — `GET /health` on the port from `PORT` (default **8080**) answers `200` while the bot is connected to Discord and `503` while it is starting, reconnecting, or shutting down, so an uptime poller can tell a live bot from a stuck one. It is intentionally never rate limited.
 - **Bot profile** — the bot shows `Dealing cards | /help` as its status, and its slash commands are registered globally so Discord lists them in the profile's **Commands** tab.
 
 ![Table](docs/preview-table.png)
@@ -137,6 +138,28 @@ join game
 start game
 ```
 
+## Health check
+
+The bot serves one small HTTP route for uptime monitors:
+
+```
+GET /health    (GET / is an alias)
+```
+
+| Bot state | Status | Example body |
+| --- | --- | --- |
+| Connected to Discord | `200` | `{"bot": "online", "guilds": 3, "tables": 1, "uptime_seconds": 42.7, "latency_ms": 53.2, "service": "pokerbot", "status": "ok"}` |
+| Starting, reconnecting, or shutting down | `503` | `{"bot": "offline", ..., "status": "unavailable"}` |
+
+- The port comes from `PORT` when the hosting platform injects one, otherwise `HEALTH_PORT`, otherwise **8080**. The server binds `HEALTH_HOST` (default `0.0.0.0`) so a platform router can reach it.
+- Docker Compose passes `PORT` into the container, publishes `${PORT:-8080}:${PORT:-8080}`, and uses this route as the container healthcheck, so `docker compose ps` reports **healthy** once Discord connects.
+- `HEAD` works too, query strings are ignored, other paths return `404`, and other methods return `405`.
+- The route is deliberately **not rate limited**: pollers and orchestrators must be able to ask as often as they like without a `429`, which would otherwise look like an outage. Any future route should get a limiter; `/health` stays exempt.
+
+```bash
+curl -i "http://localhost:${PORT:-8080}/health"
+```
+
 ## Commands
 
 | Command | Who | What it does |
@@ -225,6 +248,7 @@ pokerbot/
   game.py       table orchestration, timers, timeouts, embeds, cashier
   engine.py     poker rules wrapper, seating/blinds rotation, CSPRNG-shuffled deck
   hands.py      hand-ranking embed used by /hands
+  health.py     GET /health endpoint for uptime pollers
   ui.py         lobby/action buttons and raise modal
   visuals.py    Pillow table, hole-card, and hand-ranking renders
   store.py      PostgreSQL chip wallet, poker stats, player/server tracking

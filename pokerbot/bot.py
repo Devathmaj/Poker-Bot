@@ -6,16 +6,18 @@ import asyncio
 import hashlib
 import json
 import logging
+import math
 import time
 from contextlib import suppress
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import discord
 from discord import app_commands
 from discord.ext import commands
 
 from .cog import PokerCog
-from .config import DATA_DIR, DATABASE_URL, GUILD_ID
+from .config import DATA_DIR, DATABASE_URL, GUILD_ID, HEALTH_HOST, HEALTH_PORT
+from .health import HealthServer
 from .store import ChipStore
 
 if TYPE_CHECKING:
@@ -50,10 +52,41 @@ class PokerBot(commands.Bot):
             )
         self.store = ChipStore(DATABASE_URL)
         self.games: dict[int, PokerGame] = {}
+        self._started_at = time.monotonic()
+        self._closing = False
+        self.health = HealthServer(
+            self._health_report, host=HEALTH_HOST, port=HEALTH_PORT
+        )
         self.tree.on_error = self.on_app_command_error
         self.tree.interaction_check = self._track_interaction
         self._tracked_users: dict[int, float] = {}
         self._background: set[asyncio.Task] = set()
+
+    # ------------------------------------------------------------------ health
+    def _health_report(self) -> tuple[bool, dict[str, Any]]:
+        """Describe whether the bot is actually serving Discord right now.
+
+        Healthy means the gateway handshake completed and we have not closed.
+        A socket that is up but still connecting, or one that dropped, must
+        report unhealthy so a poller can tell a live bot from a stuck one.
+        """
+        ready = self.is_ready() and not self.is_closed() and not self._closing
+        report: dict[str, Any] = {
+            "bot": "online" if ready else "offline",
+            "user": str(self.user) if self.user else None,
+            "guilds": len(self.guilds),
+            "tables": len(self.games),
+            "uptime_seconds": round(time.monotonic() - self._started_at, 1),
+        }
+        if self._closing:
+            report["shutting_down"] = True
+        # ws.latency is nan until the first heartbeat, and ws is None before
+        # the client connects; nan is not valid JSON, so only report real
+        # numbers.
+        latency = getattr(getattr(self, "ws", None), "latency", None)
+        if ready and isinstance(latency, (int, float)) and math.isfinite(latency):
+            report["latency_ms"] = round(latency * 1000, 1)
+        return ready, report
 
     # --------------------------------------------------------------- audience
     async def _track_interaction(
@@ -198,6 +231,18 @@ class PokerBot(commands.Bot):
             logger.exception("Could not sync slash commands to guild %s", GUILD_ID)
 
     async def setup_hook(self) -> None:
+        # Start the health endpoint before anything else so pollers get a
+        # 503 while startup runs instead of a refused connection.
+        try:
+            await self.health.start()
+        except OSError:
+            # A busy port should not take the bot offline; it just means this
+            # deployment has no health endpoint until the bind is fixed.
+            logger.exception(
+                "Could not start the health endpoint on %s:%s",
+                HEALTH_HOST,
+                HEALTH_PORT,
+            )
         await self.add_cog(PokerCog(self))
         await self._sync_commands()
 
@@ -238,6 +283,9 @@ class PokerBot(commands.Bot):
         logger.info("Removed from server %s (%s)", guild.name, guild.id)
 
     async def close(self) -> None:
+        # Keep the endpoint listening but flip it to 503 for the duration of
+        # the shutdown, so a poller never sees a stale 200 while we drain.
+        self._closing = True
         # Never strand a table's chips if the bot is stopped mid-game.
         for game in list(self.games.values()):
             with suppress(Exception):
@@ -248,3 +296,5 @@ class PokerBot(commands.Bot):
         with suppress(Exception):
             await self.store.close()
         await super().close()
+        with suppress(Exception):
+            await self.health.close()

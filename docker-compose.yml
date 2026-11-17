@@ -12,10 +12,31 @@ services:
       GUILD_ID: ${GUILD_ID:-}
       # Hosted/cloud PostgreSQL from .env. This is the default setup.
       DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL in .env (see .env.example)}
+      # Port the health endpoint listens on. Hosting platforms inject PORT,
+      # so it wins over HEALTH_PORT (see config.py).
+      PORT: ${PORT:-8080}
+      HEALTH_HOST: ${HEALTH_HOST:-0.0.0.0}
     # Uncomment this block when you enable the bundled PostgreSQL service below.
     # depends_on:
     #   db:
     #     condition: service_healthy
+    ports:
+      # Uptime pollers: GET /health returns 200 while the bot is connected.
+      # Set PORT to change both sides at once (the platform-provided value).
+      - "${PORT:-8080}:${PORT:-8080}"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - |-
+          import os, urllib.request
+          port = os.environ.get("PORT", "8080")
+          urllib.request.urlopen("http://127.0.0.1:" + port + "/health", timeout=3)
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     volumes:
       # Persists the slash-command sync fingerprint between restarts.
       - pokerbot-data:/app/data
