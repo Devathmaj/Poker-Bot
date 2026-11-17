@@ -60,12 +60,12 @@ class LobbyView(PokerView):
             or interaction.message.id != self.game.lobby_message.id
         ):
             await interaction.response.send_message(
-                "This lobby is no longer active."
+                "This lobby is no longer active.", ephemeral=True
             )
             return False
         if self.game.state != "lobby":
             await interaction.response.send_message(
-                "This game has already started."
+                "This game has already started.", ephemeral=True
             )
             return False
         return True
@@ -78,7 +78,8 @@ class LobbyView(PokerView):
             return
         await interaction.response.defer()
         _ok, message = await self.game.join(interaction.user)
-        await interaction.followup.send(message)
+        # Only the player who pressed the button needs a refusal.
+        await interaction.followup.send(message, ephemeral=not _ok)
 
     @discord.ui.button(label="Start game", style=discord.ButtonStyle.primary)
     async def start(
@@ -88,13 +89,14 @@ class LobbyView(PokerView):
             return
         if interaction.user.id != self.game.host_id:
             await interaction.response.send_message(
-                "Only the host can start the game."
+                "Only the host can start the game.", ephemeral=True
             )
             return
         await interaction.response.defer()
         _ok, message = await self.game.start(interaction.user)
         try:
-            await interaction.followup.send(message)
+            # Starting is announced to the channel; a refusal is private.
+            await interaction.followup.send(message, ephemeral=not _ok)
         finally:
             if _ok:
                 # Keep the chart directly under the start confirmation.

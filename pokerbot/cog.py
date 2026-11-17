@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+from contextlib import suppress
 from datetime import UTC, datetime
 from io import BytesIO
 from typing import TYPE_CHECKING
@@ -85,7 +86,9 @@ class PokerCog(commands.Cog):
         # interaction three seconds, and the wallet lives on a remote
         # PostgreSQL host, so an un-acknowledged query shows up in Discord as
         # "The application did not respond".
-        await interaction.response.defer()
+        # Wallet details are personal, and a public reply would push the
+        # live table up the channel.
+        await interaction.response.defer(ephemeral=True)
         claim = await self.bot.store.claim_daily(
             interaction.user.id, DAILY_CHIPS
         )
@@ -320,7 +323,7 @@ class PokerCog(commands.Cog):
             interaction.channel, discord.TextChannel
         ):
             await interaction.followup.send(
-                "Create games in a normal server text channel."
+                "Create games in a normal server text channel.", ephemeral=True
             )
             return
 
@@ -328,7 +331,7 @@ class PokerCog(commands.Cog):
             self.bot, interaction.channel, interaction.user, buy_in, hands
         )
         if error:
-            await interaction.followup.send(error)
+            await interaction.followup.send(error, ephemeral=True)
             return
 
         length = (
@@ -349,13 +352,16 @@ class PokerCog(commands.Cog):
     async def endgame(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer()
         if interaction.guild is None or interaction.channel is None:
-            await interaction.followup.send("There is no table here.")
+            await interaction.followup.send(
+                "There is no table here.", ephemeral=True
+            )
             return
 
         game = self.bot.games.get(interaction.channel.id)
         if game is None:
             await interaction.followup.send(
-                "There is no active poker game in this channel."
+                "There is no active poker game in this channel.",
+                ephemeral=True,
             )
             return
 
@@ -368,7 +374,8 @@ class PokerCog(commands.Cog):
         )
         if interaction.user.id != game.host_id and not is_admin:
             await interaction.followup.send(
-                "Only the host or a server admin can end this game."
+                "Only the host or a server admin can end this game.",
+                ephemeral=True,
             )
             return
 
@@ -380,7 +387,9 @@ class PokerCog(commands.Cog):
                 "The table was closed and remaining stacks were cashed out."
             )
         else:
-            await interaction.followup.send("That game has already ended.")
+            await interaction.followup.send(
+                "That game has already ended.", ephemeral=True
+            )
 
     @app_commands.command(
         name="cards",
@@ -411,6 +420,30 @@ class PokerCog(commands.Cog):
         )
 
     # --------------------------------------------------------------- listeners
+    async def _reply_private(
+        self, message: discord.Message, content: str
+    ) -> None:
+        """Deliver a refusal without posting it in the channel.
+
+        Discord cannot make a reply to a plain chat message ephemeral, so the
+        refusal goes to the player by DM and their message is marked with ❌.
+        If DMs are closed there is no private channel left, so the reply falls
+        back to the channel.
+        """
+        try:
+            await message.author.send(
+                content, allowed_mentions=discord.AllowedMentions.none()
+            )
+        except discord.HTTPException:
+            await message.reply(
+                content,
+                mention_author=False,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        else:
+            with suppress(discord.HTTPException):
+                await message.add_reaction("❌")
+
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message) -> None:
         if message.author.bot or message.guild is None:
@@ -431,7 +464,7 @@ class PokerCog(commands.Cog):
                 message.author, action_name, amount
             )
             if not ok:
-                await message.reply(response, mention_author=False)
+                await self._reply_private(message, response)
                 return
             try:
                 await message.add_reaction("✅")
@@ -440,17 +473,21 @@ class PokerCog(commands.Cog):
             return
 
         if game is None:
-            await message.reply(
+            await self._reply_private(
+                message,
                 "There is no poker game here yet. Use `/creategame` to open one.",
-                mention_author=False,
             )
             return
 
         self.bot.track_user(message.author)
         if text == "join game":
-            _ok, response = await game.join(message.author)
+            ok, response = await game.join(message.author)
         else:
-            _ok, response = await game.start(message.author)
+            ok, response = await game.start(message.author)
+
+        if not ok:
+            await self._reply_private(message, response)
+            return
 
         try:
             await message.reply(
@@ -459,6 +496,6 @@ class PokerCog(commands.Cog):
                 allowed_mentions=discord.AllowedMentions(users=True),
             )
         finally:
-            if _ok and text == "start game":
+            if text == "start game":
                 # Keep the chart directly under the start confirmation.
                 await game.launch()

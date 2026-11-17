@@ -483,10 +483,9 @@ class PokerGame:
         try:
             description = hand.act(actor_id, action, amount)
         except IllegalAction as exc:
-            await self.channel.send(
-                f"⚠️ **{player.name}**: {exc}",
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
+            # Only this player cares about the rejection, and the hand is
+            # still on their turn, so the loop re-prompts them below.
+            await self._notify_player(actor_id, f"⚠️ {exc}")
             return
         self._log_action(street, player.name, description)
 
@@ -513,6 +512,25 @@ class PokerGame:
         except IllegalAction:
             logger.exception("Could not auto-act for %s", user_id)
         return None
+
+    async def _notify_player(self, user_id: int, content: str) -> None:
+        """Send one player a private note, never posting it in the channel.
+
+        Used for refusals that only concern the player who acted. If the
+        player cannot be reached by DM the note is only logged, because a
+        public message would both leak the refusal and bury the table.
+        """
+        guild = getattr(self.channel, "guild", None)
+        member = guild.get_member(user_id) if guild is not None else None
+        if member is None:
+            logger.info("Could not privately notify %s: %s", user_id, content)
+            return
+        try:
+            await member.send(
+                content, allowed_mentions=discord.AllowedMentions.none()
+            )
+        except discord.HTTPException:
+            logger.info("Could not privately notify %s: %s", user_id, content)
 
     async def _handle_timeout(self, player: Player) -> None:
         hand = self.table.hand
