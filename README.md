@@ -31,47 +31,111 @@ A Python Discord bot for no-limit Texas Hold'em with persistent chip wallets, da
 
 ## Setup
 
-Requires **Python 3.11+** and a **PostgreSQL** database.
+The bot needs a **Discord bot token** and a **PostgreSQL** database. Docker
+Compose bundles both the bot and the database, so the quickest start needs only
+[Docker](https://docs.docker.com/get-docker/) installed.
 
-1. Create and activate a virtual environment, then install dependencies:
+### 1. Create the Discord bot
 
-   ```bash
-   python -m venv .venv
-   # Windows:
-   .venv/Scripts/activate
-   # macOS / Linux:
-   source .venv/bin/activate
-   pip install -r requirements.txt
-   ```
+Create an application at the [Discord Developer Portal](https://discord.com/developers/applications):
 
-2. Create a bot at the [Discord Developer Portal](https://discord.com/developers/applications):
-   - Open **Bot** and reset/copy the token.
-   - Enable **Message Content Intent** under **Privileged Gateway Intents**. This is required for the typed `join game` / `start game` commands.
-   - Invite it with the `bot` and `applications.commands` scopes and these permissions: **View Channels**, **Send Messages**, **Embed Links**, **Attach Files**, **Read Message History**.
+- Open **Bot** and reset/copy the token.
+- Enable **Message Content Intent** under **Privileged Gateway Intents**. This is required for the typed `join game` / `start game` commands.
+- Invite it with the `bot` and `applications.commands` scopes and these permissions: **View Channels**, **Send Messages**, **Embed Links**, **Attach Files**, **Read Message History**.
 
-3. Create a PostgreSQL database and configure environment variables:
+### 2. Run with Docker Compose (recommended)
+
+The Compose file is set up for a **hosted/cloud PostgreSQL**: the bot reads
+`DATABASE_URL` from `.env`, and the bundled database service is commented out.
+If you prefer to run PostgreSQL in Docker instead, see
+[Use a local PostgreSQL container](#use-a-local-postgresql-container-instead).
+
+1. Create the environment file and add your token and database URL:
 
    ```bash
    cp .env.example .env
    # edit .env and set DISCORD_TOKEN=... and DATABASE_URL=postgresql://...
    ```
 
-   `DATABASE_URL` is required. The bot creates its `users` table automatically on startup. Slash commands are synced globally, which is what makes Discord list them in the bot's profile under **Commands** (Discord can take a while to show global updates). For instant command updates while developing, set `GUILD_ID` in `.env` to your server ID; the bot then also registers a copy of the commands in that server. Global syncs are only sent when the command set changes, because Discord rate limits them.
-
-4. Run the bot from the project root:
+2. Start everything:
 
    ```bash
-   python -m pokerbot
+   docker compose up -d --build
+   docker compose logs -f bot
    ```
 
-5. In a server channel:
+   The first run builds the image (a minute or so). Later starts are quick:
+   `docker compose up -d` brings the bot back in seconds. After pulling code
+   changes, rebuild with `docker compose up -d --build`.
 
+3. Stop it when you are done:
+
+   ```bash
+   docker compose down        # keeps local state
+   docker compose down -v     # also deletes the saved state
    ```
-   /daily
-   /creategame
-   join game
-   start game
+
+   Stopping sends SIGTERM and gives the bot 30 seconds to cash out any open
+   tables before it exits, so chips are never stranded. Wallets and stats live
+   in your cloud database, so they are unaffected either way.
+
+Local state is kept in the `pokerbot-data` volume (the slash-command sync
+fingerprint, which avoids unnecessary global command syncs and keeps you clear
+of Discord's rate limit).
+
+#### Use a local PostgreSQL container instead
+
+The `db` service and its volume are commented out in `docker-compose.yml`.
+To switch to a PostgreSQL container running alongside the bot:
+
+1. Uncomment the `db` service at the bottom of `docker-compose.yml`.
+2. Uncomment the `depends_on` block in the `bot` service.
+3. Uncomment `pokerbot-db` in the top-level `volumes` section.
+4. Replace the bot's `DATABASE_URL` line with the internal URL shown in the
+   comment there:
+
+   ```yaml
+   DATABASE_URL: postgresql://${POSTGRES_USER:-pokerbot}:${POSTGRES_PASSWORD:-pokerbot}@db:5432/${POSTGRES_DB:-pokerbot}
    ```
+
+5. Optionally set `POSTGRES_USER`, `POSTGRES_PASSWORD`, and `POSTGRES_DB` in
+   `.env` to override the defaults.
+
+The cloud `DATABASE_URL` in `.env` is unused by the container once the internal
+URL is in place. Wallets are then stored in the `pokerbot-db` volume, and
+`docker compose down -v` deletes them.
+
+### 3. Run locally (alternative)
+
+Requires **Python 3.11+** and a **PostgreSQL** database.
+
+```bash
+python -m venv .venv
+# Windows:
+.venv/Scripts/activate
+# macOS / Linux:
+source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env
+# edit .env and set DISCORD_TOKEN=... and DATABASE_URL=postgresql://...
+python -m pokerbot
+```
+
+The bot creates its tables automatically on startup. Slash commands are synced
+globally, which is what makes Discord list them in the bot's profile under
+**Commands** (Discord can take a while to show global updates). For instant
+command updates while developing, set `GUILD_ID` in `.env` to your server ID;
+the bot then also registers a copy of the commands in that server. Global syncs
+are only sent when the command set changes, because Discord rate limits them.
+
+### 4. Try it in a server channel
+
+```
+/daily
+/creategame
+join game
+start game
+```
 
 ## Commands
 
@@ -166,6 +230,10 @@ pokerbot/
   store.py      PostgreSQL chip wallet, poker stats, player/server tracking
 assets/cards/   MIT-licensed playing card PNGs + LICENSE
 tests/          engine, wallet, and headless game-loop tests
+Dockerfile      bot image (Python 3.12 slim, non-root, SIGTERM-aware)
+docker-compose.yml
+                bot service; optional PostgreSQL block is commented out
+.dockerignore   keeps the build context small and .env out of the image
 ```
 
 ## Tests
@@ -175,6 +243,15 @@ python -m unittest discover -s tests -v
 ```
 
 The store tests need `DATABASE_URL` (or `TEST_DATABASE_URL`) pointing at PostgreSQL; they create and drop an isolated temporary schema. They are skipped when no database is configured. The suite covers deck determinism, heads-up blinds/action order, raise validation, all-in side-pot chip conservation, showdown reveals, timeout forfeiture, daily/debit/credit behavior, and the full Discord game loop with fake Discord objects.
+
+To run the suite in the bot image against the database configured in `.env`
+(your cloud database, or the bundled container if you enabled it), mount the
+test folder into the image:
+
+```bash
+docker compose run --rm --build -v "${PWD}/tests:/app/tests" bot \
+  python -m unittest discover -s tests -v
+```
 
 ## Credits
 

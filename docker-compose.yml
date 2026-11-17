@@ -1,0 +1,58 @@
+name: pokerbot
+
+services:
+  bot:
+    build:
+      context: .
+    image: pokerbot:latest
+    restart: unless-stopped
+    init: true
+    environment:
+      DISCORD_TOKEN: ${DISCORD_TOKEN:?set DISCORD_TOKEN in .env (see .env.example)}
+      GUILD_ID: ${GUILD_ID:-}
+      # Hosted/cloud PostgreSQL from .env. This is the default setup.
+      DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL in .env (see .env.example)}
+    # Uncomment this block when you enable the bundled PostgreSQL service below.
+    # depends_on:
+    #   db:
+    #     condition: service_healthy
+    volumes:
+      # Persists the slash-command sync fingerprint between restarts.
+      - pokerbot-data:/app/data
+    # Give the bot time to cash out open tables on SIGTERM.
+    stop_grace_period: 30s
+
+  # ---------------------------------------------------------------------------
+  # Optional: bundled PostgreSQL container (disabled by default).
+  #
+  # The bot uses the cloud DATABASE_URL from .env. To use a local PostgreSQL
+  # container instead:
+  #   1. Uncomment the `db` service below.
+  #   2. Uncomment the `depends_on` block in the `bot` service above.
+  #   3. Uncomment `pokerbot-db` in the top-level `volumes` section below.
+  #   4. Replace the bot's DATABASE_URL line with the internal URL:
+  #        DATABASE_URL: postgresql://${POSTGRES_USER:-pokerbot}:${POSTGRES_PASSWORD:-pokerbot}@db:5432/${POSTGRES_DB:-pokerbot}
+  #   5. Optionally set POSTGRES_USER / POSTGRES_PASSWORD / POSTGRES_DB in .env.
+  #
+  # db:
+  #   image: postgres:16-alpine
+  #   restart: unless-stopped
+  #   environment:
+  #     POSTGRES_USER: ${POSTGRES_USER:-pokerbot}
+  #     POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-pokerbot}
+  #     POSTGRES_DB: ${POSTGRES_DB:-pokerbot}
+  #   volumes:
+  #     - pokerbot-db:/var/lib/postgresql/data
+  #   healthcheck:
+  #     test:
+  #       - CMD-SHELL
+  #       - pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"
+  #     interval: 5s
+  #     timeout: 5s
+  #     retries: 10
+  #     start_period: 5s
+
+volumes:
+  pokerbot-data:
+  # Uncomment when enabling the bundled PostgreSQL service above.
+  # pokerbot-db:
