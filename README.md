@@ -1,5 +1,11 @@
 # ♠ Discord Texas Hold'em Bot
 
+<p align="center">
+  <a href="https://discord.com/oauth2/authorize?client_id=1571900232898314400&permissions=414464858176&integration_type=0&scope=bot+applications.commands">
+    <img src="https://img.shields.io/badge/Add_to_Discord-Install_the_bot-5865F2?logo=discord&logoColor=white&style=for-the-badge" alt="Add the Poker Bot to your Discord server">
+  </a>
+</p>
+
 A Python Discord bot for no-limit Texas Hold'em with persistent chip wallets, daily rewards, real card artwork, private hole cards, turn timers, and proper side-pot handling.
 
 ![Showdown table](docs/preview-showdown.png)
@@ -42,7 +48,7 @@ Create an application at the [Discord Developer Portal](https://discord.com/deve
 
 - Open **Bot** and reset/copy the token.
 - Enable **Message Content Intent** under **Privileged Gateway Intents**. This is required for the typed `join game` / `start game` commands.
-- Invite it with the `bot` and `applications.commands` scopes and these permissions: **View Channels**, **Send Messages**, **Embed Links**, **Attach Files**, **Read Message History**.
+- Invite it with the [install link](https://discord.com/oauth2/authorize?client_id=1571900232898314400&permissions=414464858176&integration_type=0&scope=bot+applications.commands). In the channels where it plays, the bot needs **View Channels**, **Send Messages**, **Embed Links**, **Attach Files**, and **Read Message History**.
 
 ### 2. Run with Docker Compose (recommended)
 
